@@ -2114,4 +2114,84 @@ if (require(openxlsx, quietly = TRUE)) {
 message("\n✅ Manuscript tables created successfully!")
 ```
 
+```{r}
+library(survival)
+library(survminer)
+library(cmprsk)
+# optional
+safelv <- function(x) as.integer(!is.na(x) & x %in% c(TRUE, 1, "1", "Yes", "再発"))
 
+## 1) KM/Log-rank 用の二値イベントを作る（再発=1, その他=0）
+test_data <- split_data_fixed$test
+
+# vital_status が文字なら欠損対策
+if (!"vital_status" %in% names(test_data)) test_data$vital_status <- NA_character_
+
+# KM用：再発だけをイベント扱い
+test_data$km_event <- safelv(test_data$recur_2y)
+
+# 競合リスク用：0=打切り, 1=再発, 2=再発なし死亡
+test_data$event_type <- with(test_data, ifelse(
+  safelv(recur_2y) == 1, 1,
+  ifelse(!is.na(vital_status) & vital_status %in% c("死","死亡","Dead","deceased"), 2, 0)
+))
+test_data$event_type <- as.integer(test_data$event_type)
+
+## リスク群（既存の関数でOK・NA除去も）
+test_data$risk_group <- create_risk_groups(best_model, test_data)
+test_data$risk_group <- droplevels(test_data$risk_group)
+
+## 2) Kaplan–Meier と log-rank（←ここは km_event を使う）
+km_fit <- survfit(Surv(time2y, km_event) ~ risk_group, data = test_data)
+
+survdiff_result <- survdiff(Surv(time2y, km_event) ~ risk_group, data = test_data)
+p_value_km <- pchisq(survdiff_result$chisq,
+                     df = nlevels(test_data$risk_group) - 1,
+                     lower.tail = FALSE)
+message(sprintf("Log-rank test p-value: %.4f", p_value_km))
+
+km_plot <- ggsurvplot(
+  km_fit, data = test_data,
+  pval = TRUE, pval.method = TRUE,
+  risk.table = TRUE, risk.table.col = "strata",
+  palette = c("#00BFC4","#F8766D","#C77CFF"),
+  legend.labs = c("Low risk","Medium risk","High risk"),
+  title = "Kaplan-Meier Curves by Risk Group",
+  xlab = "Time (months)", ylab = "Recurrence-free probability",
+  xlim = c(0,24), break.time.by = 6, ggtheme = theme_minimal()
+)
+print(km_plot)
+
+## 3) 競合リスク（cuminc & Gray）
+# cmprsk::cuminc は fstatus に 0(打切り)/1..K を要求
+stopifnot(all(test_data$event_type %in% c(0,1,2)))
+cif <- cuminc(ftime = test_data$time2y,
+              fstatus = test_data$event_type,
+              group = test_data$risk_group,
+              cencode = 0)
+
+# Gray検定の取り方（全体 or ペアごとで行名が変わるため安全に）
+tests <- as.data.frame(cif$Tests)
+if ("pv" %in% names(tests)) {
+  gray_p <- tests$pv[1]              # 先頭=全体のp（群>2の場合）
+} else {
+  gray_p <- tests[1, ncol(tests)]    # 互換的 fallback
+}
+message(sprintf("Gray's test p-value: %.4f", gray_p))
+
+plot(cif, xlab="Time (months)", ylab="Cumulative incidence",
+     xlim=c(0,24), ylim=c(0,1), lty=1, lwd=2,
+     col=c("#00BFC4","#F8766D","#C77CFF"))
+legend("topleft", legend=c("Low risk","Medium risk","High risk"),
+       col=c("#00BFC4","#F8766D","#C77CFF"), lty=1, lwd=2)
+
+## 4) Fine–Gray 回帰（riskRegression 版）
+if (requireNamespace("riskRegression", quietly = TRUE)) {
+  library(riskRegression)
+  # Hist(time, status) で cause=1（=再発）を明示
+  fg <- FGR(Hist(time2y, event_type) ~ risk_group,
+            data = test_data, cause = 1)
+  print(summary(fg))
+}
+
+```
