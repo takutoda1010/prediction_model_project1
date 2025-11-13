@@ -25,6 +25,30 @@ suppressPackageStartupMessages({
   library(glmnet)
 })
 
+format_num <- function(x, digits = 3) {
+  ifelse(
+    is.na(x),
+    "",
+    formatC(x, format = "f", digits = digits, big.mark = ",")
+  )
+}
+
+format_p <- function(p) {
+  ifelse(
+    is.na(p),
+    "",
+    ifelse(p < 0.001, "<0.001", formatC(p, format = "f", digits = 3))
+  )
+}
+
+format_ci <- function(low, high, digits = 3) {
+  ifelse(
+    is.na(low) | is.na(high),
+    "",
+    paste0(format_num(low, digits), " to ", format_num(high, digits))
+  )
+}
+
 # ========================================================================
 # 1. ヘルパー関数: coxph
 # ========================================================================
@@ -84,6 +108,7 @@ extract_coefs_coxph <- function(model, model_name) {
 
   tibble(
     model = model_name,
+    model_type = "coxph",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, "coef"]),
     exp_estimate = as.numeric(coef_mat[, "exp(coef)"]),
@@ -92,6 +117,8 @@ extract_coefs_coxph <- function(model, model_name) {
     p_value = as.numeric(coef_mat[, "Pr(>|z|)"]),
     conf_low = conf_low,
     conf_high = conf_high,
+    exp_conf_low = exp(conf_low),
+    exp_conf_high = exp(conf_high),
     lambda = NA_real_
   )
 }
@@ -155,6 +182,7 @@ extract_coefs_glm <- function(model, model_name) {
 
   tibble(
     model = model_name,
+    model_type = "glm",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, "Estimate"]),
     exp_estimate = exp(as.numeric(coef_mat[, "Estimate"])),
@@ -163,6 +191,8 @@ extract_coefs_glm <- function(model, model_name) {
     p_value = as.numeric(coef_mat[, 4]),
     conf_low = conf_low,
     conf_high = conf_high,
+    exp_conf_low = exp(conf_low),
+    exp_conf_high = exp(conf_high),
     lambda = NA_real_
   )
 }
@@ -236,6 +266,7 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
 
   tibble(
     model = model_name,
+    model_type = "cv.glmnet",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, 1]),
     exp_estimate = exp(as.numeric(coef_mat[, 1])),
@@ -244,6 +275,8 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
     p_value = NA_real_,
     conf_low = NA_real_,
     conf_high = NA_real_,
+    exp_conf_low = NA_real_,
+    exp_conf_high = NA_real_,
     lambda = lambda_used
   ) %>%
     filter(term != "(Intercept)")
@@ -291,6 +324,7 @@ extract_coefs <- function(model, model_name) {
 
   tibble(
     model = character(),
+    model_type = character(),
     term = character(),
     estimate = double(),
     exp_estimate = double(),
@@ -299,6 +333,8 @@ extract_coefs <- function(model, model_name) {
     p_value = double(),
     conf_low = double(),
     conf_high = double(),
+    exp_conf_low = double(),
+    exp_conf_high = double(),
     lambda = double()
   )
 }
@@ -327,6 +363,7 @@ coef_table <- purrr::imap_dfr(models, extract_coefs)
 coef_table <- coef_table %>%
   mutate(
     model = as.character(model),
+    model_type = as.character(model_type),
     term = as.character(term),
     estimate = as.numeric(estimate),
     exp_estimate = as.numeric(exp_estimate),
@@ -335,15 +372,42 @@ coef_table <- coef_table %>%
     p_value = as.numeric(p_value),
     conf_low = as.numeric(conf_low),
     conf_high = as.numeric(conf_high),
+    exp_conf_low = as.numeric(exp_conf_low),
+    exp_conf_high = as.numeric(exp_conf_high),
     lambda = as.numeric(lambda)
   ) %>%
-  select(model, term, estimate, exp_estimate, std_error, statistic, p_value, conf_low, conf_high, lambda)
+  select(model, model_type, term, estimate, exp_estimate, std_error, statistic, p_value, conf_low, conf_high, exp_conf_low, exp_conf_high, lambda)
+
+pretty_table <- coef_table %>%
+  mutate(
+    Beta = format_num(estimate),
+    SE = format_num(std_error),
+    Statistic = format_num(statistic),
+    `P-value` = format_p(p_value),
+    `95% CI (Beta)` = format_ci(conf_low, conf_high),
+    `Exp(Beta)` = format_num(exp_estimate),
+    `95% CI (Exp(Beta))` = format_ci(exp_conf_low, exp_conf_high),
+    Lambda = format_num(lambda, digits = 5)
+  ) %>%
+  select(
+    Model = model,
+    `Model Type` = model_type,
+    Term = term,
+    Beta,
+    SE,
+    Statistic,
+    `P-value`,
+    `95% CI (Beta)`,
+    `Exp(Beta)`,
+    `95% CI (Exp(Beta))`,
+    Lambda
+  )
 
 # 出力ディレクトリの作成
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 }
 
-readr::write_csv(coef_table, output_path)
+readr::write_csv(pretty_table, output_path)
 
 message(sprintf("Saved model coefficients to: %s", output_path))
