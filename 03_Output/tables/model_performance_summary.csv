@@ -1,0 +1,11 @@
+"Model","C_index_Train","C_index_Val","C_index_Test","AUC_Test","Brier_Test","Overfitting_CIndex","Rank","vs_TNM_CIndex"
+"m1_stepaic_forward",0.716,0.691,0.776,0.781,0.237,-0.06,1,0.053
+"m5_univariate_screen",0.719,0.722,0.767,0.76,0.196,-0.048,2,0.043
+"m6_rfe",0.72,0.681,0.749,0.748,0.237,-0.029,3,0.026
+"m2_stepaic_backward",0.716,0.672,0.746,0.747,0.208,-0.03,4,0.022
+"m8_predefined",0.708,0.683,0.742,0.734,0.255,-0.034,5,0.019
+"m3_stepbic_forward",0.698,0.688,0.731,0.724,0.226,-0.033,6,0.007
+"TNM",0.673,0.654,0.723,0.717,0.25,-0.05,7,0
+"m4_stepbic_backward",0.701,0.679,0.69,0.682,0.296,0.011,8,-0.033
+"m7_lasso",NA,NA,NA,NA,NA,NA,9,NA
+"m7k_lasso_constrained",NA,NA,NA,NA,NA,NA,10,NA

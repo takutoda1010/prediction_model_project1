@@ -1,0 +1,1058 @@
+---
+title: "5_Validation"
+author: "Takuto Yoshida"
+date: "2025-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## M7のCalibration
+# Calibration-in-the-large (normal)
+```{r}
+## ==== CAL-M7-CITL-0: 前提の取得（fit, データ, t*）=============================
+stopifnot(exists("tst"))                # Testデータ（Surv-ready: time2y, event2y）
+t_star <- 24
+
+# M7 の Cox fit を取得
+get_m7_fit <- function(){
+  if (exists("model_results") && !is.null(model_results[["M7_LASSO_postCox"]])) {
+    fr <- model_results[["M7_LASSO_postCox"]]
+    if (inherits(fr$fit, "coxph")) return(fr$fit)
+    if (inherits(fr$fit_post, "coxph")) return(fr$fit_post)
+  }
+  if (exists("fit_m7") && inherits(fit_m7, "coxph")) return(fit_m7)
+  stop("M7 の Cox モデルが見つかりません（model_results[['M7_LASSO_postCox']]$fit などを確認）。")
+}
+fit_m7 <- get_m7_fit()
+
+# Test の基本チェック
+stopifnot(all(c("time2y","event2y") %in% names(tst)))
+T_test <- as.numeric(tst$time2y)
+D_test <- as.integer(tst$event2y)
+
+```
+
+
+```{r}
+## ==== CAL-M7-CITL-1: 24か月時点の予測確率 p_hat(24) を計算 ===================
+# LP（大きいほど高リスク）
+lp_test <- as.numeric(predict(fit_m7, newdata = tst, type = "lp"))
+# ベースライン生存 S0(t) を取得
+sf0 <- survival::survfit(fit_m7)  # 学習（Train+Val）上のベースライン
+s0_24 <- try(as.numeric(summary(sf0, times = t_star)$surv), silent = TRUE)
+if (inherits(s0_24, "try-error") || !is.finite(s0_24)) {
+  s0_24 <- tail(sf0$surv, 1)  # timesが一致しない場合は末尾で代替
+}
+# 予測確率 p = 1 - S0(24)^{exp(lp)}
+p_hat <- 1 - (s0_24)^(exp(lp_test))
+# 数値安定化
+p_hat <- pmin(pmax(p_hat, 1e-8), 1 - 1e-8)
+
+cat(sprintf("[M7][CITL] baseline S0(24)=%.4f, mean(pred)=%.4f\n", s0_24, mean(p_hat)))
+
+```
+
+```{r}
+## ==== CAL-M7-CITL-2: 観測リスク（KM）と“差分CITL” ============================
+# KMで O(24) = 1 - S(24) を推定（再発=イベント、他は打ち切り）
+sf_obs <- survival::survfit(Surv(T_test, D_test) ~ 1)
+S24 <- try(as.numeric(summary(sf_obs, times = t_star)$surv), silent = TRUE)
+if (inherits(S24, "try-error") || !is.finite(S24)) {
+  # 24が超過していたら最後の生存を代用
+  S24 <- tail(sf_obs$surv, 1)
+}
+O24 <- 1 - S24
+CITL_diff <- mean(p_hat) - O24
+
+cat(sprintf("[M7][CITL] Observed risk at 24m (KM) = %.4f\n", O24))
+cat(sprintf("[M7][CITL] CITL (mean(pred) - observed) = %.4f\n", CITL_diff))
+
+```
+
+
+```{r}
+## ==== CAL-M7-CITL-3: IPCWロジスティック再校正（切片= CITL） ==================
+# 目的：logit(Y(24)) ~ 1 + offset(logit(p_hat)), 重み=IPCW
+# ここで Y(24)=1(24mまでに再発), 0(それ以外)。検閲はIPCWで補正。
+logit <- function(x) log(x/(1-x))
+
+# (a) 検閲(KM)を推定： 'censored before 24m' をイベントにする
+delta_c <- as.integer(T_test < t_star & D_test == 0)   # 24m前に打ち切り→1
+sf_cens <- survival::survfit(Surv(T_test, delta_c) ~ 1)
+
+Ghat <- function(u){
+  # 検閲生存 G(u) = P(C > u) を返す（外挿は最後の値で）
+  su <- try(as.numeric(summary(sf_cens, times = u)$surv), silent = TRUE)
+  if (inherits(su, "try-error") || !is.finite(su)) su <- tail(sf_cens$surv, 1)
+  su
+}
+
+# (b) 時点t*におけるIPCW重み（“t*で状態がわかる個体のみ”に重み付け）
+w_ipcw <- numeric(length(T_test))
+for (i in seq_along(T_test)) {
+  if (D_test[i] == 1 && T_test[i] <= t_star) {
+    # t* 前イベント → G(T-) で割る（実装上は G(T) を近似使用）
+    g <- Ghat(T_test[i])
+    w_ipcw[i] <- if (is.finite(g) && g > 1e-8) 1/g else 0
+  } else if (T_test[i] >= t_star) {
+    # t* まで無検閲で到達 → G(t*) で割る
+    g <- Ghat(t_star)
+    w_ipcw[i] <- if (is.finite(g) && g > 1e-8) 1/g else 0
+  } else {
+    # t* 前に検閲 → 状態不明なので寄与0
+    w_ipcw[i] <- 0
+  }
+}
+
+# (c) ロジスティック再校正（切片のみ、offset=logit(p_hat)）
+df_cal <- data.frame(
+  Y = as.integer(D_test == 1 & T_test <= t_star),
+  off = logit(p_hat),
+  w = w_ipcw
+)
+fit_cal <- glm(Y ~ 1 + offset(off),
+               weights = w, family = binomial(), data = df_cal)
+
+alpha <- coef(fit_cal)[1]                    # これが CITL（理想 0）
+se_a  <- sqrt(vcov(fit_cal)[1,1])
+ci_a  <- alpha + c(-1,1) * 1.96 * se_a
+
+cat(sprintf("[M7][CITL][IPCW-logit] alpha (CITL) = %.4f (SE=%.4f), 95%% CI [%.4f, %.4f]\n",
+            alpha, se_a, ci_a[1], ci_a[2]))
+cat(sprintf("[M7][CITL] counts: n_event<=24=%d, n_cens<24=%d, n_known@24=%d\n",
+            sum(D_test==1 & T_test<=t_star),
+            sum(D_test==0 & T_test<t_star),
+            sum(T_test>=t_star) + sum(D_test==1 & T_test<=t_star)))
+
+```
+
+# data visualization
+```{r}
+## ==== CAL-M7-VIS: Calibration plot at 24m (KM-based) ========================
+stopifnot(exists("tst"))
+t_star <- 24
+
+# 1) 予測確率（既に作っているなら再利用OK）
+fit_m7 <- if (exists("fit_m7")) fit_m7 else {
+  if (!is.null(model_results[["M7_LASSO_postCox"]]$fit)) model_results[["M7_LASSO_postCox"]]$fit else stop("fit_m7 not found")
+}
+lp_test <- as.numeric(predict(fit_m7, newdata = tst, type = "lp"))
+
+sf0   <- survival::survfit(fit_m7)
+s0_24 <- try(as.numeric(summary(sf0, times = t_star)$surv), silent = TRUE)
+if (inherits(s0_24, "try-error") || !is.finite(s0_24)) s0_24 <- tail(sf0$surv, 1)
+
+p_hat <- 1 - (s0_24)^(exp(lp_test))
+p_hat <- pmin(pmax(p_hat, 1e-8), 1-1e-8)   # 数値安定化
+
+# 2) デシル分割 & 各グループの観測リスク（KM）を算出
+dfc <- data.frame(p_hat = p_hat, T = as.numeric(tst$time2y), D = as.integer(tst$event2y))
+keep <- is.finite(dfc$p_hat) & is.finite(dfc$T) & is.finite(dfc$D)
+dfc  <- dfc[keep, , drop = FALSE]
+
+# 予測に基づく10等分（ntile使用）
+if (!requireNamespace("dplyr", quietly = TRUE)) stop("dplyr needed")
+dfc$grp <- dplyr::ntile(dfc$p_hat, 10)
+
+km_O24 <- function(d){
+  sf <- survival::survfit(Surv(T, D) ~ 1, data = d)
+  s  <- try(as.numeric(summary(sf, times = t_star)$surv), silent = TRUE)
+  if (inherits(s, "try-error") || !is.finite(s)) s <- tail(sf$surv, 1)
+  1 - s
+}
+
+agg <- dplyr::group_by(dfc, grp) |>
+  dplyr::summarise(
+    pred = mean(p_hat),
+    obs  = km_O24(dplyr::cur_data()),
+    n    = dplyr::n(),
+    .groups = "drop"
+  )
+
+# 3) 描画
+op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+par(mar = c(5,5,3,3))
+plot(agg$pred, agg$obs, pch = 19, xlim = c(0,1), ylim = c(0,1),
+     xlab = "Predicted risk at 24 months",
+     ylab = "Observed risk (KM) at 24 months",
+     main = "Calibration plot at 24 months (M7, no competing risk)")
+abline(0, 1, lty = 2, col = "gray60")
+# 参考: LOESS（全点、重みなしの簡易版）
+lo <- try(loess(obs ~ pred, data = agg, span = 0.8), silent = TRUE)
+if (!inherits(lo, "try-error")) {
+  xs <- seq(min(agg$pred), max(agg$pred), length.out = 200)
+  ys <- predict(lo, newdata = data.frame(pred = xs))
+  lines(xs, pmin(pmax(ys, 0), 1), lwd = 2)
+}
+text(0.98, 0.05, labels = "45° = perfect calibration", pos = 2, cex = 0.9)
+
+```
+モデル全体の平均的なズレを示す Calibration-in-the-Large は alpha = -0.15 (95%信頼区間 -0.47 to 0.16)。平均してわずかに過大予測の傾向があるが、信頼区間が0をまたいでいるため、統計的に有意なズレはなし。キャリブレーション曲線は非線形な形状。予測リスクが低い範囲（約0.2–0.3）と高い範囲（約0.8以上）で過大予測が、中間範囲（約0.4–0.7）で過小予測が見られる。このパターンの背景として、訓練データとテストデータのベースラインリスクに差があると考えられる。訓練データの24ヶ月生存率 S_0(24)=0.34に対し、テストセットの観測リスクは0.403であり、テストセットの方が高リスク集団であったことが影響している可能性がある。
+
+
+# Calibration slope
+```{r}
+## ==== CAL-SLOPE-M7-1: Test LP (drop NA safely) ==============================
+stopifnot(exists("tst"))
+
+# M7 の最終 Cox モデルを取得
+fit_m7 <- if (exists("fit_m7")) fit_m7 else {
+  stopifnot(!is.null(model_results[["M7_LASSO_postCox"]]$fit))
+  model_results[["M7_LASSO_postCox"]]$fit
+}
+
+# 線形予測子（LP）
+lp_m7 <- suppressWarnings(as.numeric(predict(fit_m7, newdata = tst, type = "lp")))
+keep  <- is.finite(lp_m7) & is.finite(tst$time2y) & is.finite(tst$event2y)
+
+if (sum(!keep) > 0) {
+  message(sprintf("[M7][cal-slope] Dropping %d rows with NA/Inf in LP or outcome.", sum(!keep)))
+}
+d_cal <- data.frame(time2y = tst$time2y[keep],
+                    event2y = tst$event2y[keep],
+                    LP      = lp_m7[keep])
+
+```
+
+```{r}
+## ==== CAL-SLOPE-M7-2: Cox recalibration (slope only) ========================
+# Cox: Surv(time, event) ~ beta * LP   （切片はCoxでは定義されない）
+fit_slope <- survival::coxph(Surv(time2y, event2y) ~ LP, data = d_cal, ties = "efron")
+
+b  <- as.numeric(coef(fit_slope)["LP"])
+se <- sqrt(vcov(fit_slope)["LP","LP"])
+ci <- b + c(-1, 1) * 1.96 * se
+
+cat(sprintf("[M7][Calibration slope] beta = %.3f (SE = %.3f), 95%% CI [%.3f, %.3f]\n",
+            b, se, ci[1], ci[2]))
+
+# ちょい解釈メッセージ
+msg <- if (is.na(b)) {
+  "Slope is NA (check LP/outcome)."
+} else if (b < 1) {
+  "Predictions are too extreme (over/under swings too large)."
+} else if (b > 1) {
+  "Predictions are too weak/flat (under-dispersed)."
+} else "Perfect slope."
+cat(sprintf("[M7][Calibration slope] %s\n", msg))
+
+```
+
+```{r}
+## ==== CAL-M7-VIS: Calibration @24m (KM) + Cox recalibration line ============
+stopifnot(exists("tst"))
+t_star <- 24
+
+# -- 1) 予測確率（学習側 S0(24) を使用）と LP -------------------------------
+fit_m7 <- if (exists("fit_m7")) fit_m7 else {
+  mf <- model_results[["M7_LASSO_postCox"]]$fit
+  if (is.null(mf)) stop("fit_m7 not found")
+  mf
+}
+lp_test <- suppressWarnings(as.numeric(predict(fit_m7, newdata = tst, type = "lp")))
+
+sf0   <- survival::survfit(fit_m7)
+s0_24 <- try(as.numeric(summary(sf0, times = t_star)$surv), silent = TRUE)
+if (inherits(s0_24, "try-error") || !is.finite(s0_24)) s0_24 <- tail(sf0$surv, 1)
+
+p_hat <- 1 - (s0_24)^(exp(lp_test))
+p_hat <- pmin(pmax(p_hat, 1e-8), 1 - 1e-8)  # 数値安定化
+
+# -- 2) デシル分割 & 観測リスク（KM） ---------------------------------------
+dfc <- data.frame(p_hat = p_hat,
+                  T = as.numeric(tst$time2y),
+                  D = as.integer(tst$event2y),
+                  LP = lp_test)
+keep <- is.finite(dfc$p_hat) & is.finite(dfc$T) & is.finite(dfc$D) & is.finite(dfc$LP)
+dfc  <- dfc[keep, , drop = FALSE]
+
+if (!requireNamespace("dplyr", quietly = TRUE)) stop("dplyr needed")
+dfc$grp <- dplyr::ntile(dfc$p_hat, 10)
+
+km_O24 <- function(d){
+  sf <- survival::survfit(Surv(T, D) ~ 1, data = d)
+  s  <- try(as.numeric(summary(sf, times = t_star)$surv), silent = TRUE)
+  if (inherits(s, "try-error") || !is.finite(s)) s <- tail(sf$surv, 1)
+  1 - s
+}
+
+agg <- dplyr::group_by(dfc, grp) |>
+  dplyr::summarise(
+    pred = mean(p_hat),
+    obs  = km_O24(dplyr::cur_data()),
+    n    = dplyr::n(),
+    .groups = "drop"
+  )
+
+# --- [PATCH] ③ Cox 再校正（LPのみ）→ ベースラインは「LP=0」で取得 ----
+fit_slope  <- survival::coxph(Surv(T, D) ~ LP, data = dfc, ties = "efron")
+beta_hat   <- as.numeric(coef(fit_slope)["LP"])
+
+# ★ ベースラインは newdata=LP=0 で取得（ここが重要）
+sf_star      <- survival::survfit(fit_slope, newdata = data.frame(LP = 0))
+s0_star_24   <- try(as.numeric(summary(sf_star, times = t_star)$surv), silent = TRUE)
+if (inherits(s0_star_24, "try-error") || !is.finite(s0_star_24)) s0_star_24 <- tail(sf_star$surv, 1)
+
+# 正しい再校正予測
+p_recal <- 1 - (s0_star_24)^(exp(beta_hat * dfc$LP))
+p_recal <- pmin(pmax(p_recal, 1e-8), 1 - 1e-8)
+
+# p_recal を dfc の列として持たせる（これが抜けていた）
+dfc$p_recal <- p_recal
+
+agg_recal <- dplyr::group_by(dfc, grp) |>
+  dplyr::summarise(
+    pred  = mean(p_hat),
+    recal = mean(p_recal),   # ← これで各グループごとの平均に
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(pred)
+
+
+agg_recal <- dplyr::group_by(dfc, grp) |>
+  dplyr::summarise(
+    pred  = mean(p_hat),        # x軸は元の予測（デシルの平均）
+    recal = mean(p_recal),      # y軸に再校正後の平均リスク
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(pred)
+
+# -- 4) 描画：黒点（KM by decile）+ LOESS + 紫の再校正ライン -----------------
+op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+par(mar = c(5,5,3,3))
+plot(agg$pred, agg$obs, pch = 19, xlim = c(0,1), ylim = c(0,1),
+     xlab = "Predicted risk at 24 months",
+     ylab = "Observed risk (KM) at 24 months",
+     main = "Calibration plot at 24 months (M7)\nwith Cox recalibration line")
+abline(0, 1, lty = 2, col = "gray65")  # 45°
+
+lo <- try(loess(obs ~ pred, data = agg, span = 0.8), silent = TRUE)
+if (!inherits(lo, "try-error")) {
+  xs <- seq(min(agg$pred), max(agg$pred), length.out = 300)
+  ys <- pmin(pmax(predict(lo, newdata = data.frame(pred = xs)), 0), 1)
+  lines(xs, ys, lwd = 2)
+}
+
+lines(agg_recal$pred, agg_recal$recal, lwd = 2, col = "purple3")  # 再校正ライン
+legend("topleft", bty = "n",
+       legend = c("KM by decile", "LOESS (observed)", "Cox recalibrated"),
+       pch = c(19, NA, NA), lty = c(NA, 1, 1), lwd = c(NA, 2, 2),
+       col = c("black", "black", "purple3"))
+mtext(sprintf("β̂ (slope) = %.3f", beta_hat), side = 3, adj = 1, cex = 0.9)
+# （任意）各点に n を表示したい場合：
+# text(agg$pred, agg$obs, labels = agg$n, pos = 3, cex = 0.8)
+
+```
+キャリブレーション・スロープbeta_hatは0.956（95%信頼区間0.645–1.267）であった。この値は理想値である1に近く、かつ95%信頼区間が1を含むため、スロープの統計的に有意な乖離は認められない。したがって、予測の振れ幅が過大または過小であるとは結論付けられない。beta_hat<1という結果は、軽度のオプティミズム（わずかな過学習）を示唆するが、実質的には良好なキャリブレーションが達成されている。
+
+# 競合リスク
+```{r}
+## ==== PATCH-CR0: Packages (robust to missing 'pseudo') ======================
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(survival)
+  library(prodlim)        # Aalen–Johansen (CIF)
+  library(cmprsk)         # Fine–Gray backend
+  library(riskRegression) # FGR() & predictRisk()
+  library(sandwich); library(lmtest)  # robust SE
+})
+HAS_PSEUDO <- requireNamespace("pseudo", quietly = TRUE)
+if (!HAS_PSEUDO) message("[WARN] package 'pseudo' not found; using decile-level fallback for calibration slope.")
+
+## ==== HOTFIX: helpers missing? ==============================================
+if (!exists("keep_finite")) keep_finite <- function(x) is.finite(x) & !is.na(x)
+if (!exists("clip01"))      clip01      <- function(p, eps=1e-8) pmin(pmax(p, eps), 1-e-8)
+
+```
+
+```{r}
+## ==== CHUNK-CR-FIX1: Build competing-risks vars (strict) ====================
+stopifnot(exists("trv"), exists("tst"))
+
+build_cr_vars_strict <- function(df, t_star = 24, tie_tol = 0.01){
+  d <- df
+
+  # helper: months between two Dates (robust)
+  mon_diff <- function(a, b){
+    if (!("Date" %in% class(a))) a <- as.Date(a)
+    if (!("Date" %in% class(b))) b <- as.Date(b)
+    as.numeric(a - b) / 30.4375
+  }
+
+  # death フラグと死亡時間（生存なら NA にする）
+  death_flag <- rep(NA, nrow(d))
+  if ("vital10" %in% names(d)) {
+    # vital10: 生=TRUE / 死=FALSE
+    death_flag <- (isTRUE(d$vital10) == FALSE)
+  }
+  if ("vital_status" %in% names(d)) {
+    vs <- tolower(as.character(d$vital_status))
+    death_flag <- ifelse(!is.na(vs), death_flag | vs %in% c("死","deceased","dead","死亡"), death_flag)
+  }
+  death_flag[is.na(death_flag)] <- FALSE
+
+  # 時間の用意
+  os_m <- if ("os_months" %in% names(d)) as.numeric(d$os_months) else NA_real_
+  # 生存例の os_m は「死亡時刻」ではないので使わない（NA にする）
+  os_m[!death_flag] <- NA_real_
+
+  # フォローアップ（打ち切り用）
+  fu_m <- NA_real_
+  if (all(c("last_followup","op_date") %in% names(d))) {
+    fu_m <- suppressWarnings(mon_diff(d$last_followup, d$op_date))
+  } else if ("time2y" %in% names(d)) {
+    fu_m <- as.numeric(d$time2y) # fallback
+  }
+
+  # 再発時間：再発例のみ rfs_months、非再発は NA にする
+  recur_flag <- if ("recur_tf" %in% names(d)) (d$recur_tf == TRUE) else !is.na(d$recur_date)
+  rfs_m <- if ("rfs_months" %in% names(d)) as.numeric(d$rfs_months) else NA_real_
+  rfs_m[!recur_flag] <- NA_real_
+
+  # first event の決定
+  #  1) 再発も死亡もある → 早い方（同着は再発優先）
+  #  2) 片方だけ → それ
+  #  3) どちらも無い → censor @ fu_m
+  who <- integer(nrow(d)); who[] <- 0L
+  time_use <- rep(NA_real_, nrow(d))
+
+  both <- is.finite(rfs_m) & is.finite(os_m)
+  earlier_r <- both & (rfs_m < os_m - tie_tol)
+  earlier_d <- both & (os_m < rfs_m - tie_tol)
+  tie       <- both & (abs(rfs_m - os_m) <= tie_tol)
+
+  who[earlier_r | tie] <- 1L
+  time_use[earlier_r | tie] <- rfs_m[earlier_r | tie]
+
+  who[earlier_d] <- 2L
+  time_use[earlier_d] <- os_m[earlier_d]
+
+  only_r <- is.finite(rfs_m) & !is.finite(os_m)
+  who[only_r] <- 1L
+  time_use[only_r] <- rfs_m[only_r]
+
+  only_d <- is.finite(os_m) & !is.finite(rfs_m)
+  who[only_d] <- 2L
+  time_use[only_d] <- os_m[only_d]
+
+  none <- !is.finite(rfs_m) & !is.finite(os_m)
+  who[none] <- 0L
+  time_use[none] <- fu_m[none]
+
+  # 出力
+  out <- transform(d,
+                   time_cr   = as.numeric(time_use),
+                   status_cr = as.integer(who))
+  list(df = out, t_star = t_star)
+}
+
+# 再構築
+cr_trv <- build_cr_vars_strict(trv)
+cr_tst <- build_cr_vars_strict(tst)
+trv_cr <- cr_trv$df %>% dplyr::filter(is.finite(time_cr), time_cr > 0)
+tst_cr <- cr_tst$df %>% dplyr::filter(is.finite(time_cr), time_cr > 0)
+
+# 状態の内訳確認
+cat("== [FIX] Status composition after strict build (Train+Val) ==\n")
+print(table(trv_cr$status_cr, useNA="ifany"))
+
+```
+
+```{r}
+## ==== CHUNK-CR-FIX2: recover M7 vars, drop exact duplicates, harmonize ======
+stopifnot(exists("model_results"))
+m7 <- model_results[["M7_LASSO_postCox"]]
+
+# M7 の親候補を回収（fit / selected_parents / selected_vars のいずれか）
+vars_fg <- NULL
+if (!is.null(m7$selected_parents)) vars_fg <- m7$selected_parents
+if (is.null(vars_fg) && !is.null(m7$selected_vars)) vars_fg <- m7$selected_vars
+if (is.null(vars_fg) && !is.null(m7$fit)) {
+  cn <- try(names(stats::coef(m7$fit)), silent = TRUE)
+  if (!inherits(cn, "try-error") && length(cn)) {
+    parent_guess <- gsub("^`|`$", "", cn)
+    parent_guess <- sub(":.*$", "", parent_guess)
+    parent_guess <- sub("\\..*$", "", parent_guess)
+    vars_fg <- unique(parent_guess)
+  }
+}
+if (is.null(vars_fg) && exists("fit_m7")) {
+  cn <- try(names(stats::coef(fit_m7)), silent = TRUE)
+  if (!inherits(cn, "try-error") && length(cn)) {
+    parent_guess <- gsub("^`|`$", "", cn)
+    parent_guess <- sub(":.*$", "", parent_guess)
+    parent_guess <- sub("\\..*$", "", parent_guess)
+    vars_fg <- unique(parent_guess)
+  }
+}
+if (is.null(vars_fg) && exists("var_all")) {
+  vars_fg <- intersect(var_all, names(trv_cr))
+}
+stopifnot(length(vars_fg) > 0)
+
+# Fine-Gray に投入可能な列に制限
+vars_fg <- intersect(vars_fg, names(trv_cr)); stopifnot(length(vars_fg) > 0)
+
+# --- 完全重複の親を自動で片側除去（数値親で |r|>=0.999999） ----------------
+num_par <- Filter(function(v) is.numeric(trv_cr[[v]]), vars_fg)
+drop_par <- character(0)
+if (length(num_par) >= 2) {
+  # 簡易クラスタリング：最初に見つけた親を代表にし、以降は重複扱いを drop
+  seen <- list()
+  for (v in num_par) {
+    x <- trv_cr[[v]]; okx <- is.finite(x)
+    dup_to <- NA_character_
+    for (rep in names(seen)) {
+      y <- seen[[rep]]; ok <- okx & is.finite(y)
+      if (sum(ok) >= 3) {
+        r <- suppressWarnings(cor(x[ok], y[ok]))
+        if (is.finite(r) && abs(r) >= 0.999999) { dup_to <- rep; break }
+      }
+    }
+    if (is.na(dup_to)) {
+      seen[[v]] <- x
+    } else {
+      drop_par <- union(drop_par, v)
+    }
+  }
+}
+vars_fg_pruned <- setdiff(vars_fg, drop_par)
+if (length(drop_par)) {
+  cat("[FIX] Dropped parents due to exact duplication: ",
+      paste(drop_par, collapse=", "), "\n", sep="")
+}
+stopifnot(length(vars_fg_pruned) > 0)
+
+# 文字/論理 → 因子化 & テスト側レベル合わせ
+to_fac <- vapply(trv_cr[vars_fg_pruned], function(x) is.character(x) || is.logical(x), logical(1))
+trv_cr[vars_fg_pruned[to_fac]] <- lapply(trv_cr[vars_fg_pruned[to_fac]], factor)
+tst_cr[vars_fg_pruned[to_fac]] <- Map(function(x, lev) factor(x, levels = lev),
+                                      tst_cr[vars_fg_pruned[to_fac]],
+                                      lapply(trv_cr[vars_fg_pruned[to_fac]], levels))
+
+cat(sprintf("[CR2] vars_fg_pruned (n=%d): %s\n", length(vars_fg_pruned), paste(vars_fg_pruned, collapse=", ")))
+
+```
+```{r}
+## ==== CHUNK-CR3-ROBUST: Fine-Gray with auto-pruning until non-singular ======
+stopifnot(exists("trv_cr"), exists("tst_cr"))
+start_vars <- if (exists("vars_fg_pruned")) vars_fg_pruned else vars_fg
+stopifnot(length(start_vars) > 0)
+
+# -- helpers ------------------------------------------------------------------
+.mm_by_parents <- function(d, parents){
+  form_x <- as.formula(paste("~", paste(parents, collapse=" + ")))
+  MM0 <- model.matrix(form_x, data = d)
+  cn  <- colnames(MM0)
+  has_int <- "(Intercept)" %in% cn
+  MM  <- if (has_int) MM0[, cn!="(Intercept)", drop=FALSE] else MM0
+  assign_v <- attr(MM0, "assign"); if (has_int) assign_v <- assign_v[cn!="(Intercept)"]
+  term_lb  <- attr(terms(form_x), "term.labels")
+  parent_by_col <- term_lb[assign_v]
+  list(MM=MM, parent_by_col=parent_by_col)
+}
+
+.drop_one_parent_for_fullrank <- function(MM, parent_by_col){
+  # 1) 定数列を消す（親ごと）
+  const_cols <- vapply(seq_len(ncol(MM)), function(j) length(unique(MM[, j])) <= 1, logical(1))
+  if (any(const_cols)) {
+    return(unique(parent_by_col[const_cols])[1])
+  }
+  # 2) 完全重複列（同一パターン）→ 重複親のうち1つ
+  keys <- apply(MM, 2, function(col) paste(col, collapse=","))
+  dup_idx <- if (ncol(MM)>1) which(duplicated(keys)) else integer(0)
+  if (length(dup_idx)) {
+    return(unique(parent_by_col[dup_idx])[1])
+  }
+  # 3) QRランク落ち → 従属列の親のうちダミー数が多い親
+  qrMM <- qr(MM)
+  if (qrMM$rank < ncol(MM)) {
+    dep_cols <- setdiff(seq_len(ncol(MM)), sort(qrMM$pivot[1:qrMM$rank]))
+    dep_par  <- parent_by_col[dep_cols]
+    tab <- sort(table(parent_by_col), decreasing = TRUE)
+    cand <- intersect(names(tab), unique(dep_par))
+    if (length(cand)) return(cand[1])
+    # 保険：親の中で最も列が多いもの
+    return(names(tab)[1])
+  }
+  # 4) すでにフルランクなら NULL
+  NULL
+}
+
+.try_fit_FGR <- function(vars_try){
+  # 因子化レベル整合
+  to_fac <- vapply(trv_cr[vars_try], function(x) is.character(x) || is.logical(x), logical(1))
+  tr_loc <- trv_cr; te_loc <- tst_cr
+  tr_loc[vars_try[to_fac]] <- lapply(tr_loc[vars_try[to_fac]], factor)
+  te_loc[vars_try[to_fac]] <- Map(function(x, lev) factor(x, levels = lev),
+                                  te_loc[vars_try[to_fac]], lapply(tr_loc[vars_try[to_fac]], levels))
+  # フルランク確認
+  mm <- .mm_by_parents(tr_loc, vars_try)
+  qrMM <- qr(mm$MM)
+  if (qrMM$rank < ncol(mm$MM)) {
+    return(list(ok=FALSE, fit=NULL, vars=vars_try, reason="rank_deficit", tr=tr_loc, te=te_loc))
+  }
+  # FGR 本体
+  form_fg <- as.formula(paste("Hist(time_cr, status_cr) ~", paste(vars_try, collapse=" + ")))
+  fit <- try(riskRegression::FGR(form_fg, data = tr_loc, cause = 1), silent = TRUE)
+  if (inherits(fit, "try-error")) {
+    return(list(ok=FALSE, fit=NULL, vars=vars_try, reason="fgr_singular", tr=tr_loc, te=te_loc))
+  }
+  list(ok=TRUE, fit=fit, vars=vars_try, tr=tr_loc, te=te_loc)
+}
+
+# -- main loop ----------------------------------------------------------------
+vars_keep <- unique(start_vars)
+max_iter  <- 50L
+iter <- 0L
+repeat {
+  iter <- iter + 1L
+  if (iter > max_iter) stop("[CR3] Gave up after max iterations; still singular.")
+
+  # まず設計行列レベルでのフルランク化（親1つずつ削る）
+  mm <- .mm_by_parents(trv_cr, vars_keep)
+  drop_par <- .drop_one_parent_for_fullrank(mm$MM, mm$parent_by_col)
+  if (!is.null(drop_par)) {
+    message(sprintf("[CR3] Drop(parent for rank): %s", drop_par))
+    vars_keep <- setdiff(vars_keep, drop_par)
+    next
+  }
+
+  # FGR を試す
+  fit_try <- .try_fit_FGR(vars_keep)
+  if (fit_try$ok) {
+    message(sprintf("[CR3] FGR fit OK with %d parents: %s",
+                    length(vars_keep), paste(vars_keep, collapse=", ")))
+    fit_fg  <- fit_try$fit
+    tr_loc  <- fit_try$tr
+    te_loc  <- fit_try$te
+    break
+  } else {
+    # FGR 内部で特異行列 → “依存列に関与する親”を1つ落とす
+    mm2 <- .mm_by_parents(trv_cr, vars_keep)
+    qr2 <- qr(mm2$MM)
+    dep_cols <- setdiff(seq_len(ncol(mm2$MM)), sort(qr2$pivot[1:qr2$rank]))
+    dep_pars <- if (length(dep_cols)) unique(mm2$parent_by_col[dep_cols]) else character(0)
+    # フォールバック：列数の多い親
+    tab <- sort(table(mm2$parent_by_col), decreasing = TRUE)
+    cand <- if (length(dep_pars)) intersect(names(tab), dep_pars) else names(tab)
+    drop_par2 <- cand[1]
+    message(sprintf("[CR3] Drop(parent after FGR singular): %s", drop_par2))
+    vars_keep <- setdiff(vars_keep, drop_par2)
+    if (length(vars_keep) == 0) stop("[CR3] No parents left to fit FGR.")
+    next
+  }
+}
+
+# -- predict CIF@24 & AJ observed --------------------------------------------
+t_star <- 24
+pred_cif <- as.numeric(riskRegression::predictRisk(fit_fg, newdata = te_loc, times = t_star, cause = 1))
+pred_cif <- pmin(pmax(pred_cif, 1e-8), 1-1e-8)
+
+pl_all    <- prodlim::prodlim(Hist(time_cr, status_cr) ~ 1, data = te_loc)
+obs_cif24 <- as.numeric(predict(pl_all, cause = 1, times = t_star))
+if (!is.finite(obs_cif24)) obs_cif24 <- tail(predict(pl_all, cause = 1), 1)
+
+cat(sprintf("[CR3] CIF@24: mean(pred)=%.3f, AJ(obs)=%.3f\n", mean(pred_cif), obs_cif24))
+cat(sprintf("[CR3] Parents used (final): %s\n", paste(vars_keep, collapse=", ")))
+
+# 保存（後続の可視化やCITL/傾き用）
+cal_cr_M7_core <- list(fit_fg=fit_fg, pred_cif=pred_cif, obs_cif24=obs_cif24,
+                       parents=vars_keep, tr=tr_loc, te=te_loc)
+
+```
+# Data Visualization
+```{r}
+## ==== CR3-VIS1: Calibration at 24m (CIF, Aalen–Johansen) ====================
+stopifnot(exists("tst_cr"), exists("prodlim"))
+
+# 既に保存があるなら使う
+if (exists("cal_cr_M7_core")) {
+  pred_cif <- cal_cr_M7_core$pred_cif
+  df_vis   <- cal_cr_M7_core$te
+} else {
+  # フォールバック（fit_fg がある前提）
+  stopifnot(exists("fit_fg"))
+  pred_cif <- as.numeric(riskRegression::predictRisk(fit_fg, newdata = tst_cr, times = 24, cause = 1))
+  df_vis   <- tst_cr
+}
+pred_cif <- pmin(pmax(pred_cif, 1e-8), 1-1e-8)
+
+# デシルごとに観測CIF（AJ）を計算
+if (!requireNamespace("dplyr", quietly = TRUE)) stop("dplyr required")
+df_plot <- data.frame(pred = pred_cif,
+                      time = as.numeric(df_vis$time_cr),
+                      status = as.integer(df_vis$status_cr))
+df_plot <- df_plot[is.finite(df_plot$pred) & is.finite(df_plot$time) & is.finite(df_plot$status), , drop=FALSE]
+df_plot$dec <- dplyr::ntile(df_plot$pred, 10L)
+
+aj_dec <- df_plot |>
+  dplyr::group_by(dec) |>
+  dplyr::summarise(
+    pred = mean(pred, na.rm = TRUE),
+    obs  = {
+      pl <- prodlim::prodlim(Hist(time, status) ~ 1, data = dplyr::cur_data())
+      o  <- as.numeric(predict(pl, cause = 1, times = 24))
+      if (!is.finite(o)) tail(predict(pl, cause = 1), 1) else o
+    },
+    n = dplyr::n(),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(pred)
+
+# 全体の観測CIF
+pl_all <- prodlim::prodlim(Hist(time, status) ~ 1, data = df_plot)
+obs_all_24 <- as.numeric(predict(pl_all, cause = 1, times = 24))
+obs_all_24 <- ifelse(is.finite(obs_all_24), obs_all_24, tail(predict(pl_all, cause = 1), 1))
+citl <- mean(df_plot$pred) - obs_all_24
+
+op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+par(mar = c(5,5,3,2))
+plot(aj_dec$pred, aj_dec$obs,
+     xlim = c(0,1), ylim = c(0,1),
+     xlab = "Predicted CIF at 24 months",
+     ylab = "Observed CIF at 24 months (Aalen–Johansen)",
+     pch = 19, main = "Competing-risks Calibration (24m)")
+
+abline(0, 1, lty = 2, col = "gray60")                 # 45°
+# LOESSの平滑線（参考）
+lo <- try(loess(obs ~ pred, data = aj_dec, span = 0.8), silent = TRUE)
+if (!inherits(lo, "try-error")) {
+  xs <- seq(min(aj_dec$pred), max(aj_dec$pred), length.out = 300)
+  ys <- pmin(pmax(predict(lo, newdata = data.frame(pred = xs)), 0), 1)
+  lines(xs, ys, lwd = 2)
+}
+# デシルごとのサンプルサイズをラベル表示（任意）
+text(aj_dec$pred, aj_dec$obs, labels = aj_dec$n, pos = 3, cex = 0.8)
+
+legend("topleft", bty = "n",
+       legend = c("Decile AJ", "LOESS", "45°"),
+       pch = c(19, NA, NA), lty = c(NA, 1, 2), lwd = c(NA, 2, 1),
+       col = c("black", "black", "gray60"))
+
+mtext(sprintf("Mean(pred)=%.3f, AJ(24)=%.3f, CITL≈%.3f",
+              mean(df_plot$pred), obs_all_24, citl),
+      side = 3, adj = 1, cex = 0.9)
+
+```
+
+```{r}
+## ==== CR3-VIS2: CIF curves by predicted-risk tertiles =======================
+df_curve <- df_plot
+q <- quantile(df_curve$pred, probs = c(1/3, 2/3), na.rm = TRUE)
+df_curve$grp <- cut(df_curve$pred,
+                    breaks = c(-Inf, q[1], q[2], Inf),
+                    labels = c("Low", "Mid", "High"),
+                    right = TRUE)
+
+pl_grp <- prodlim::prodlim(Hist(time, status) ~ grp, data = df_curve)
+
+# CIF（cause=1）を描画（prodlim の標準描画）
+plot(pl_grp, cause = 1, xlab = "Months since surgery", ylab = "CIF for recurrence",
+     legend = TRUE, atrisk = FALSE, main = "CIF (cause 1) by predicted-risk tertiles")
+
+```
+
+# DCA
+```{r}
+## ==== DCA-0: Helpers for 24m-risk & IPCW Net Benefit ========================
+t_star <- 24
+
+# Coxの24m予測リスク（学習側のS0(t*)を使用）
+predict_risk_cox <- function(fit, newdata, t_star = 24){
+  lp  <- as.numeric(predict(fit, newdata = newdata, type = "lp"))
+  sf0 <- survival::survfit(fit)
+  s0t <- try(as.numeric(summary(sf0, times = t_star)$surv), silent = TRUE)
+  if (inherits(s0t, "try-error") || !is.finite(s0t)) s0t <- tail(sf0$surv, 1)
+  p   <- 1 - (s0t)^(exp(lp))
+  pmin(pmax(p, 1e-8), 1 - 1e-8)
+}
+
+# IPCW（検閲の逆確率重み）を 24m 点に構築
+# 入力は time2y(=min(time,24)), event2y(=1:24m以内再発) を想定
+compute_ipcw_24 <- function(time2y, event2y, t_star = 24){
+  time2y  <- as.numeric(time2y)
+  event2y <- as.integer(event2y)
+
+  # 検閲イベント: 24m未満で打ち切り（= event2y==0 & time2y<24）
+  delta_cens <- as.integer((event2y == 0) & (time2y < t_star))
+  sfC <- survival::survfit(Surv(time2y, delta_cens) ~ 1)
+
+  Ghat_of <- function(u){
+    s <- try(as.numeric(summary(sfC, times = u, extend = TRUE)$surv), silent = TRUE)
+    if (inherits(s, "try-error") || !is.finite(s)) s <- tail(sfC$surv, 1)
+    s
+  }
+
+  w <- rep(NA_real_, length(time2y))
+  # 24m以内イベント: w_i = 1 / Ghat(t_i)
+  idx_e <- which(event2y == 1)
+  if (length(idx_e)) w[idx_e] <- 1 / pmax(vapply(time2y[idx_e], Ghat_of, numeric(1)), 1e-6)
+  # 24m時点で未再発（control）: w_i = 1 / Ghat(24)
+  idx_c <- which((event2y == 0) & (time2y >= t_star))
+  if (length(idx_c)) w[idx_c] <- 1 / pmax(Ghat_of(t_star), 1e-6)
+  # 24m未満で打ち切りは0（寄与なし；IPCWが他で補う）
+  idx_u <- which((event2y == 0) & (time2y < t_star))
+  if (length(idx_u)) w[idx_u] <- 0
+
+  w
+}
+
+# Net Benefit カーブ（IPCW版）
+net_benefit_curve <- function(p_hat, time2y, event2y, thresholds, t_star = 24){
+  w <- compute_ipcw_24(time2y, event2y, t_star)
+  ok <- is.finite(w) & is.finite(p_hat)
+  w  <- w[ok]; p_hat <- p_hat[ok]
+  time2y <- time2y[ok]; event2y <- event2y[ok]
+  N <- length(w)
+
+  out <- lapply(thresholds, function(pt){
+    treat <- as.integer(p_hat >= pt)
+    TP <- sum(w * treat * (event2y == 1), na.rm = TRUE) / N
+    FP <- sum(w * treat * (event2y == 0 & time2y >= t_star), na.rm = TRUE) / N
+    NB <- TP - FP * (pt / (1 - pt))
+    c(pt = pt, NB = NB)
+  })
+  as.data.frame(do.call(rbind, out))
+}
+
+# Treat-all / Treat-none の NB
+nb_treat_all <- function(time2y, event2y, thresholds, t_star = 24){
+  w <- compute_ipcw_24(time2y, event2y, t_star)
+  ok <- is.finite(w); w <- w[ok]; time2y <- time2y[ok]; event2y <- event2y[ok]
+  N <- length(w)
+  base_TP <- sum(w * (event2y == 1), na.rm = TRUE) / N
+  base_FP <- sum(w * (event2y == 0 & time2y >= t_star), na.rm = TRUE) / N
+  data.frame(
+    pt = thresholds,
+    NB = base_TP - base_FP * (thresholds / (1 - thresholds))
+  )
+}
+nb_treat_none <- function(thresholds){
+  data.frame(pt = thresholds, NB = 0)
+}
+
+```
+
+```{r}
+## ==== PATCH: Rebuild & save M7 fit into model_results =======================
+stopifnot(exists("model_results"))
+stopifnot(!is.null(model_results[["M7_LASSO_postCox"]]))
+m7 <- model_results[["M7_LASSO_postCox"]]
+
+# trv / tst が無ければ復元
+if (!exists("trv") || !exists("tst")) {
+  stopifnot(exists("ds09_train"), exists("ds09_val"), exists("ds09_test"), exists("prep_surv"))
+  trv <- dplyr::bind_rows(prep_surv(ds09_train), prep_surv(ds09_val))
+  tst <- prep_surv(ds09_test)
+}
+
+# 選択変数を取得（親名）
+sel <- m7$selected_vars
+stopifnot(length(sel) > 0, all(sel %in% names(trv)))
+
+# 因子レベル整合（Train基準）
+to_fac <- vapply(trv[sel], function(x) is.character(x) || is.logical(x) || is.factor(x), logical(1))
+trv[sel[to_fac]] <- lapply(trv[sel[to_fac]], function(x) if (is.factor(x)) x else factor(x))
+tst[sel[to_fac]] <- Map(function(x, lev){
+  x <- if (is.factor(x)) x else factor(x)
+  factor(x, levels = lev)
+}, tst[sel[to_fac]], lapply(trv[sel[to_fac]], levels))
+
+# 定数（0分散）親を落とす保険
+const_parent <- vapply(sel, function(v){
+  x <- trv[[v]]
+  u <- unique(if (is.factor(x)) as.character(x) else x)
+  length(stats::na.omit(u)) <= 1
+}, logical(1))
+if (any(const_parent)) {
+  sel <- sel[!const_parent]
+}
+stopifnot(length(sel) > 0)
+
+# 再フィットして保存
+form_post <- as.formula(paste("Surv(time2y, event2y) ~", paste(sel, collapse = " + ")))
+fit_m7 <- survival::coxph(form_post, data = trv, ties = "efron", x = TRUE, y = TRUE)
+model_results[["M7_LASSO_postCox"]]$fit <- fit_m7
+cat(sprintf("[PATCH] Rebuilt M7 fit with %d variables and saved to model_results.\n", length(sel)))
+
+# （任意）過去コード互換: auc_df フィールドが無ければ auc から補完
+if (is.null(model_results[["M7_LASSO_postCox"]]$auc_df) &&
+    !is.null(model_results[["M7_LASSO_postCox"]]$auc) &&
+    all(c("time","AUC") %in% names(model_results[["M7_LASSO_postCox"]]$auc))) {
+  model_results[["M7_LASSO_postCox"]]$auc_df <- 
+    model_results[["M7_LASSO_postCox"]]$auc[, c("time","AUC")]
+  cat("[PATCH] Filled auc_df from auc.\n")
+}
+
+```
+
+
+```{r}
+## ==== DCA-1 (REWRITE): risks for M7 and TNM (t+n+m) =========================
+stopifnot(exists("trv"), exists("tst"), exists("model_results"))
+stopifnot(!is.null(model_results[["M7_LASSO_postCox"]]$fit))
+fit_m7 <- model_results[["M7_LASSO_postCox"]]$fit
+
+# M7 の 24m リスク
+risk_m7 <- predict_risk_cox(fit_m7, newdata = tst, t_star = if (exists("t_star")) t_star else 24)
+
+# TNM (t + n + m) で Cox を学習（Train+Val）→ Test に 24m リスク
+tnm_vars <- intersect(c("t","n","m"), names(trv))
+stopifnot(all(c("t","n","m") %in% tnm_vars))
+
+# 文字/論理/因子を因子化し、level を Train+Val に合わせる
+to_fac <- vapply(trv[tnm_vars], function(x) is.character(x) || is.logical(x) || is.factor(x), logical(1))
+trv[tnm_vars[to_fac]] <- lapply(trv[tnm_vars[to_fac]], function(x) if (is.factor(x)) x else factor(x))
+tst[tnm_vars[to_fac]] <- Map(function(x, lev){
+  x <- if (is.factor(x)) x else factor(x)
+  factor(x, levels = lev)
+}, tst[tnm_vars[to_fac]], lapply(trv[tnm_vars[to_fac]], levels))
+
+fit_tnm  <- survival::coxph(Surv(time2y, event2y) ~ t + n + m, data = trv, ties = "efron", x = TRUE, y = TRUE)
+risk_tnm <- predict_risk_cox(fit_tnm, newdata = tst, t_star = if (exists("t_star")) t_star else 24)
+
+# 参考: 件数チェック（必要なら）
+cat(sprintf("[DCA] Test N=%d | cases<=24=%d | controls@24=%d | cens<24=%d\n",
+            nrow(tst),
+            sum(tst$time2y <= (if (exists("t_star")) t_star else 24) & tst$event2y == 1, na.rm = TRUE),
+            sum(tst$time2y >  (if (exists("t_star")) t_star else 24), na.rm = TRUE),
+            sum(tst$time2y <  (if (exists("t_star")) t_star else 24) & tst$event2y == 0, na.rm = TRUE)))
+
+
+```
+
+```{r}
+## ==== DCA-2: Net Benefit curves (with IPCW) =================================
+# 主領域 5–30% を強調しつつ、0.01〜0.50 を描く
+ths_all <- seq(0.01, 0.50, by = 0.01)
+
+nb_m7   <- net_benefit_curve(risk_m7,  tst$time2y, tst$event2y, ths_all, t_star)
+nb_tnm  <- net_benefit_curve(risk_tnm, tst$time2y, tst$event2y, ths_all, t_star)
+nb_all  <- nb_treat_all(tst$time2y, tst$event2y, ths_all, t_star)
+nb_none <- nb_treat_none(ths_all)
+
+# 可視化用に結合
+nb_m7$label   <- "M7 (post-LASSO Cox)"
+nb_tnm$label  <- "TNM (t+n+m)"
+nb_all$label  <- "Treat-all"
+nb_none$label <- "Treat-none"
+
+d_nb <- rbind(nb_m7, nb_tnm, nb_all, nb_none)
+
+```
+
+```{r}
+## ==== DCA-3: Plot Decision Curves ==========================================
+op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+par(mar = c(5,5,3,2))
+
+# 下地（全域）
+plot(NA, xlim = c(0.01, 0.50), ylim = range(d_nb$NB, na.rm = TRUE),
+     xlab = "Threshold probability at 24 months",
+     ylab = "Net Benefit",
+     main = "Decision Curve Analysis (24-month recurrence)")
+
+# 主領域 5–30% をシェーディング
+usr <- par("usr")
+rect(0.05, usr[3], 0.30, usr[4], col = adjustcolor("grey80", alpha.f = 0.4), border = NA)
+
+# 各曲線
+lines(nb_m7$pt,  nb_m7$NB,  lwd = 2)
+lines(nb_tnm$pt, nb_tnm$NB, lwd = 2, lty = 2)
+lines(nb_all$pt, nb_all$NB, lwd = 1, lty = 3)
+lines(nb_none$pt, nb_none$NB, lwd = 1, lty = 1, col = "grey40")
+
+abline(h = 0, col = "grey60", lty = 3)
+
+legend("topright", bty = "n",
+       legend = c("M7 (post-LASSO Cox)", "TNM (t+n+m)", "Treat-all", "Treat-none"),
+       lwd = c(2,2,1,1), lty = c(1,2,3,1), col = c("black","black","black","grey40"))
+mtext("Shaded area = primary clinical range (5–30%)", side = 3, adj = 0, cex = 0.9)
+
+```
+
+# Brier score
+```{r}
+## ==== BRIER-1: 使うモデルを拾う（coxph が fit されているものだけ） ==========
+stopifnot(exists("trv"), exists("tst"), exists("model_results"))
+
+get_cox_fits <- function(mr){
+  keys <- names(mr)
+  fits <- lapply(keys, function(k) try(mr[[k]]$fit, silent = TRUE))
+  ok   <- vapply(fits, function(f) inherits(f, "coxph"), logical(1))
+  setNames(fits[ok], keys[ok])
+}
+cox_fits <- get_cox_fits(model_results)
+stopifnot(length(cox_fits) > 0)
+t_star <- 24
+
+```
+
+```{r}
+## ==== FIX: sanitize_cox_fit() 親マッピングを assign で厳密化 =================
+sanitize_cox_fit <- function(fit, df_train, max_iter = 10L) {
+  stopifnot(inherits(fit, "coxph"))
+  kept <- attr(terms(fit), "term.labels")
+  if (is.null(kept) || !length(kept)) stop("[sanitize] no term labels in fit")
+
+  iter <- 0L
+  repeat {
+    iter <- iter + 1L
+    if (iter > max_iter) stop("[sanitize] still has NA coefs after pruning")
+
+    # 現在の parents だけで再フィット
+    form <- as.formula(paste("Surv(time2y, event2y) ~", paste(kept, collapse = " + ")))
+    fit2 <- survival::coxph(form, data = df_train, ties = "efron", x = TRUE, y = TRUE)
+
+    co <- stats::coef(fit2)
+    if (!any(is.na(co))) return(fit2)  # 収束：NA なし
+
+    # --- 係数名 -> 親変数名の対応を model.matrix の assign で厳密に取得 ---
+    mm       <- model.matrix(form, data = df_train)           # (Intercept) を含む
+    cn       <- colnames(mm)
+    has_int  <- "(Intercept)" %in% cn
+    mm_noint <- if (has_int) mm[, cn != "(Intercept)", drop = FALSE] else mm
+    assign_v <- attr(mm, "assign"); if (has_int) assign_v <- assign_v[cn != "(Intercept)"]
+    term_lb  <- attr(terms(form), "term.labels")
+    parent_by_col <- setNames(term_lb[assign_v], colnames(mm_noint))  # 列名 → 親
+
+    na_cols    <- names(co)[is.na(co)]
+    na_parents <- unique(na.omit(parent_by_col[na_cols]))
+
+    if (!length(na_parents)) {
+      # フォールバック（念のため）：因子ダミー名から親を推測
+      na_parents <- unique(sub("^(.*?)[[:alnum:]_]*$", "\\1", na_cols))
+    }
+
+    message(sprintf("[sanitize] drop parents: %s", paste(na_parents, collapse = ", ")))
+    kept <- setdiff(kept, na_parents)
+    if (!length(kept)) stop("[sanitize] all parents removed; nothing left to fit")
+  }
+}
+
+```
+
+```{r}
+cox_fits_sane <- lapply(names(cox_fits), function(nm){
+  fit <- cox_fits[[nm]]
+  co  <- try(stats::coef(fit), silent = TRUE)
+  if (inherits(co, "try-error") || any(is.na(co))) {
+    message(sprintf("[sanitize] '%s': NA coefs detected -> refit", nm))
+    sanitize_cox_fit(fit, trv)
+  } else fit
+})
+names(cox_fits_sane) <- names(cox_fits)
+
+# Brier@24m 再計算
+brier_test <- get_brier24(cox_fits_sane, tst)
+brier_test
+
+```
+
+
+# 層別化
+## KM曲線の提示

@@ -1,0 +1,15 @@
+"0","plot_bar(ds01_model)       # 離散（文字/因子）を棒グラフ"
+"2","11 columns ignored with more than 50 categories.
+id: 990 categories
+num: 990 categories
+dob: 952 categories
+last_followup: 739 categories
+recur_date: 518 categories
+first_visit_dt: 781 categories
+adm_dt: 935 categories
+op_date: 977 categories
+op_dx_txt: 112 categories
+op_proc_txt: 695 categories
+comp_txt: 182 categories
+
+"

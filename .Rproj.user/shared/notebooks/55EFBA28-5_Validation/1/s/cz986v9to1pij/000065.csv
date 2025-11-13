@@ -1,0 +1,4 @@
+"0",""
+"0","legend(""topright"", bty = ""n"","
+"0","       legend = c(""M7 (post-LASSO Cox)"", ""TNM (t+n+m)"", ""Treat-all"", ""Treat-none""),"
+"0","       lwd = c(2,2,1,1), lty = c(1,2,3,1), col = c(""black"",""black"",""black"",""grey40""))"

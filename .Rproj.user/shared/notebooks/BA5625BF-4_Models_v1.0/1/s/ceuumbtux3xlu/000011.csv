@@ -1,0 +1,5 @@
+"0","## ==== CHUNK4f: Test評価 & 保存（C-index & TD-AUC, 6/12/18/24m） ============="
+"0","res_m6 <- eval_model(fit_m6, tst, model_name_m6)"
+"1","
+[M6_RFE_Cox] Harrell's C = 0.721 (SE=0.035) 95%CI [0.652, 0.789]
+"

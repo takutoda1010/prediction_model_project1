@@ -1,0 +1,6 @@
+"0","if (!exists(""model_results"")) model_results <- list()"
+"0","model_results[[model_name_m6]] <- res_m6"
+"0",""
+"0","# 参考：CV曲線を後で図示しやすいように保持"
+"0","cv_curve_m6 <- cv_tab"
+"0",""

@@ -1,0 +1,1597 @@
+---
+title: "4_Models"
+author: "Takuto Yoshida"
+date: "2025-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# ds07から不要な変数を削除しds08を作成する。
+①まずは不要と思われる変数の列を削除
+②対数変換された連続変数に関しては、変換前のオリジナルの変数は削除する
+```{r}
+## ==== CHUNK: Drop unused + drop originals of transformed vars (exclude rfs/os) ====
+suppressPackageStartupMessages({ library(dplyr) })
+
+# ① 明示ドロップ（そのまま）
+vars_to_drop <- c(
+  "group_rb","tum_diam_pre","tum_count_pre","vp_pre","vv_pre",
+  "op_dx_txt","op_proc_txt","op_proc_cat","pringle","thoraco_lap",
+  "rehepatectomy","grade_txt"
+)
+
+# ② 変換済み列の「元」変数はドロップするが、下記は除外
+exclude_vars <- c("rfs_months","os_months")
+
+tf_cols      <- names(ds07)[grepl("(_log1p|_asinh|_reflog1p)$", names(ds07))]
+orig_from_tf <- setdiff(unique(sub("(_log1p|_asinh|_reflog1p)$", "", tf_cols)), exclude_vars)
+
+present_drop <- intersect(vars_to_drop, names(ds07))           # ①
+orig_to_drop <- intersect(orig_from_tf, names(ds07))           # ②（除外考慮後）
+
+to_drop <- unique(c(present_drop, orig_to_drop))
+
+ds08 <- ds07 %>% select(-any_of(to_drop))
+
+# 確認（任意）
+message(sprintf("Dropped %d columns: %s",
+                length(to_drop), paste(to_drop, collapse = ", ")))
+```
+
+# 予測に用いる変数の候補は下記に選定する。
+①まずは術後に得られるデータも全部含めた変数一覧。
+多重共線性の観点から、vp_preなどは候補から削除
+stage_diag age sex hbv hcv alb che pt_inr hh15 liver_damage child_pugh op_time_min curability growth_type fc fc_inf sf im sm t n m fibrosis_score grading_score microVI macroVI ALBIscore BMI lhl15_log1p afp_log1p bleed_ml_log1p tbil_log1p ca19_9_log1p pivka2_log1p ast_log1p cea_log1p tum_count_pre_log1p alt_log1p specimen_wt_log1p icg_r15_log1p max_diam_cm_log1p  afp_l3_log1p tum_diam_pre_log1p plt_log1p
+
+②術前に得られるデータのみの場合の候補一覧
+stage_surg n_pre m_pre age sex hbv hcv alb che pt_inr hh15 liver_damage child_pugh ALBIscore BMI lhl15_log1p afp_log1p tbil_log1p ca19_9_log1p pivka2_log1p ast_log1p cea_log1p tum_count_pre_log1p alt_log1p icg_r15_log1p max_diam_cm_log1p afp_l3_log1p tum_diam_pre_log1p plt_log1p
+
+```{r}
+## ==== CHUNK: define candidate sets (var_all, var_pre) on ds08 ====
+stopifnot(exists("ds08"))
+
+# ① 術後データも含めた候補（多重共線性のため vp_pre 等は入れない前提）
+var_all_candidates <- c(
+  "stage_diag","age","sex","hbv","hcv","alb","che","pt_inr","hh15",
+  "liver_damage","child_pugh","op_time_min","curability","growth_type",
+  "fc","fc_inf","sf","im","sm","t","n","m","fibrosis_score","grading_score",
+  "microVI","macroVI","ALBIscore","BMI","lhl15_log1p","afp_log1p",
+  "bleed_ml_log1p","tbil_log1p","ca19_9_log1p","pivka2_log1p","ast_log1p",
+  "cea_log1p","tum_count_pre_log1p","alt_log1p","specimen_wt_log1p",
+  "icg_r15_log1p","max_diam_cm_log1p","afp_l3_log1p","tum_diam_pre_log1p",
+  "plt_log1p"
+)
+
+# ② 術前のみの候補
+var_pre_candidates <- c(
+  "stage_surg","n_pre","m_pre","age","sex","hbv","hcv","alb","che","pt_inr",
+  "hh15","liver_damage","child_pugh","ALBIscore","BMI","lhl15_log1p",
+  "afp_log1p","tbil_log1p","ca19_9_log1p","pivka2_log1p","ast_log1p",
+  "cea_log1p","tum_count_pre_log1p","alt_log1p","icg_r15_log1p",
+  "max_diam_cm_log1p","afp_l3_log1p","tum_diam_pre_log1p","plt_log1p"
+)
+
+# 実在列だけを残し（順序は指定順のまま）、欠損は警告表示
+present <- names(ds08)
+
+var_all <- var_all_candidates[var_all_candidates %in% present]
+var_pre <- var_pre_candidates[var_pre_candidates %in% present]
+
+missing_all <- setdiff(var_all_candidates, present)
+missing_pre <- setdiff(var_pre_candidates, present)
+
+message(sprintf("var_all: %d vars", length(var_all)))
+if (length(missing_all)) message("Missing in ds08 (var_all): ", paste(missing_all, collapse=", "))
+
+message(sprintf("var_pre: %d vars", length(var_pre)))
+if (length(missing_pre)) message("Missing in ds08 (var_pre): ", paste(missing_pre, collapse=", "))
+
+```
+
+# データセットの分割
+今回の目的変数であるrecur_2yの欠損するIDを先に削除
+```{r}
+ds09 <- ds08 %>% dplyr::filter(!is.na(recur_2y))
+# ← この ds08_model を時間的に 60/20/20 に split して学習・検証・外部（時間）検証へ
+```
+
+時間的に独立したデータセットを作成。
+op_dateを用いて行う。分割は6:2:2でTrain/Val/Test splitを行う。
+```{r}
+## ==== CHUNK: Temporal split ds09 -> ds09_train/val/test (60/20/20) ====
+stopifnot(exists("ds09"))
+suppressPackageStartupMessages({ library(dplyr) })
+
+d <- ds09 %>%
+  mutate(op_date = as.Date(op_date)) %>%
+  filter(!is.na(op_date)) %>%
+  arrange(op_date)
+
+od_num <- as.numeric(d$op_date)
+q1 <- as.Date(stats::quantile(od_num, probs = 0.60, na.rm = TRUE, type = 7), origin = "1970-01-01")
+q2 <- as.Date(stats::quantile(od_num, probs = 0.80, na.rm = TRUE, type = 7), origin = "1970-01-01")
+
+# 同日が多い場合など q1>=q2 の保険（最小限）
+if (!is.finite(q1) || !is.finite(q2) || q1 >= q2) {
+  u <- sort(unique(d$op_date))
+  pos <- which(u >= q1)[1]
+  if (!is.na(pos) && pos < length(u)) q2 <- u[pos + 1]
+}
+
+ds09_train <- d %>% filter(op_date <= q1)
+ds09_val   <- d %>% filter(op_date >  q1 & op_date <= q2)
+ds09_test  <- d %>% filter(op_date >  q2)
+
+summarize_split <- function(d, name) {
+  cat(sprintf("%s: n=%d, events=%d, first=%s, last=%s\n",
+              name, nrow(d), sum(d$event != 0, na.rm = TRUE),
+              ifelse(nrow(d)>0, as.character(min(d$op_date)), NA),
+              ifelse(nrow(d)>0, as.character(max(d$op_date)), NA)))
+}
+summarize_split(ds09_train, "ds09_train")
+summarize_split(ds09_val,   "ds09_val")
+summarize_split(ds09_test,  "ds09_test")
+```
+
+
+# モデルを作成する
+①変数選択の候補の変数を選択する
+②各モデルを作成する
+
+*モデル1* Stepwise AIC, forward selection
+```{r}
+## ==== CHUNK 0: Packages ====
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(survival)
+  library(MASS)      # stepAIC
+  library(timeROC)   # time-dependent AUC
+})
+
+stopifnot(exists("ds09_train"), exists("ds09_val"), exists("ds09_test"), exists("var_all"))
+```
+
+```{r}
+## ==== CHUNK1: make Surv-ready data from ds09 (use existing time2y & recur_2y) ====
+prep_surv <- function(df){
+  df %>%
+    mutate(
+      time2y  = as.numeric(time2y),
+      event2y = as.integer(recur_2y == TRUE)   # 再発=1, それ以外=0
+    ) %>%
+    filter(is.finite(time2y), time2y > 0, !is.na(event2y))
+}
+
+trv <- bind_rows(prep_surv(ds09_train), prep_surv(ds09_val))  # 学習: Train+Val
+tst <- prep_surv(ds09_test)                                   # 評価: Test
+```
+
+
+
+```{r}
+## ==== CHUNK2: Predictor set & minimal harmonization =========================
+# 予測子は var_all を使用（存在するものだけ）
+preds <- intersect(var_all, names(trv))
+
+# 定数列があれば落とす（通常は何も落ちない想定）
+const_flag <- vapply(preds, \(v){ x <- trv[[v]]; length(unique(x[!is.na(x)])) <= 1 }, logical(1))
+if (any(const_flag)) preds <- preds[!const_flag]
+
+# 文字/論理は因子化し、Test のレベルを学習側に合わせる
+to_fac <- vapply(trv[preds], \(x) is.character(x) || is.logical(x), logical(1))
+trv[preds[to_fac]] <- lapply(trv[preds[to_fac]], factor)
+tst[preds[to_fac]] <- Map(function(x, lev) factor(x, levels = lev),
+                          tst[preds[to_fac]], lapply(trv[preds[to_fac]], levels))
+```
+
+# NullモデルとGreedyモデル
+```{r}
+## ==== CHUNK3: Stepwise AIC (forward) Cox on Train+Val =======================
+form_upper <- as.formula(paste("Surv(time2y, event2y) ~", paste(preds, collapse = " + ")))
+fit0      <- coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+
+fit_step <- stepAIC(fit0,
+                    scope     = list(lower = ~1, upper = form_upper),
+                    direction = "forward",
+                    trace     = TRUE)
+
+cat("\nSelected terms:\n"); print(attr(terms(fit_step), "term.labels"))
+
+```
+
+```{r}
+# ==== PATCH 1: モデル名を付与（CHUNK3の直後に追加）===========================
+model_name_m1 <- "M1_StepAIC_forward"
+selected_terms_m1 <- attr(terms(fit_step), "term.labels")
+```
+
+
+# c-indexとtime dependent AUC
+```{r}
+# ==== PATCH 2: 評価結果を model_results に保存（CHUNK4 を置き換え） ==========
+# 予測スコア（大きいほど高リスク）
+risk_test <- as.numeric(predict(fit_step, newdata = tst, type = "lp"))
+
+# ---- 1) Harrell's C-index（向き補正） + bootstrap SE/CI ----
+d_eval <- tst
+d_eval$risk <- risk_test
+
+cobj    <- survival::concordance(Surv(time2y, event2y) ~ risk, data = d_eval, reverse = TRUE)
+c_index <- as.numeric(cobj$concordance)
+
+set.seed(20251102)
+B <- 500
+c_boot <- replicate(B, {
+  idx <- sample.int(nrow(d_eval), replace = TRUE)
+  survival::concordance(Surv(time2y[idx], event2y[idx]) ~ risk[idx],
+                        data = d_eval[idx, ], reverse = TRUE)$concordance
+})
+c_se <- stats::sd(c_boot, na.rm = TRUE)
+c_ci <- c_index + c(-1, 1) * 1.96 * c_se
+
+cat(sprintf("[TEST] Harrell's C-index = %.3f (SE = %.3f), 95%% CI [%.3f, %.3f]\n",
+            c_index, c_se, c_ci[1], c_ci[2]))
+
+# ---- 2) Time-dependent AUC（評価可能な時点だけ自動で） ----
+auc_df <- NULL
+if ("rfs_months" %in% names(tst)) {
+  delta_full <- if ("rfs_event" %in% names(tst)) as.integer(tst$rfs_event == 1) else
+                if ("recur_event" %in% names(tst)) as.integer(tst$recur_event == 1) else
+                as.integer(tst$recur_2y == TRUE)
+  T_full <- as.numeric(tst$rfs_months)
+
+  times_try <- c(24, 18, 12, 6)
+  ok <- vapply(times_try, function(t){
+    sum(T_full <= t & delta_full == 1, na.rm = TRUE) > 0 &&
+      sum(T_full >  t,                 na.rm = TRUE) > 0
+  }, logical(1))
+  times_ok <- times_try[ok]
+
+  if (length(times_ok) == 0) {
+    cat("[TEST] TD-AUC: Test セットに評価可能な時点がありません（追跡不足）。\n")
+  } else {
+    roc <- timeROC(T = T_full, delta = delta_full, marker = risk_test,
+                   cause = 1, times = sort(times_ok), iid = TRUE)
+    auc_df <- data.frame(time = roc$times, AUC = roc$AUC)
+    print(auc_df, row.names = FALSE)
+    if (!24 %in% times_ok) {
+      cat("Note: 24ヶ月はcontrols=0のため評価不可。最も近い時点で代替評価を表示しました。\n")
+    }
+  }
+} else {
+  T_cut <- as.numeric(tst$time2y)
+  delta_cut <- as.integer(tst$event2y)
+
+  times_try <- c(23.9, 18, 12, 6)
+  ok <- vapply(times_try, function(t){
+    sum(T_cut <= t & delta_cut == 1, na.rm = TRUE) > 0 &&
+      sum(T_cut >  t,                 na.rm = TRUE) > 0
+  }, logical(1))
+  times_ok <- times_try[ok]
+
+  if (length(times_ok) == 0) {
+    cat("[TEST] TD-AUC: time2y でも評価可能な時点がありません（controls不足）。\n")
+  } else {
+    roc <- timeROC(T = T_cut, delta = delta_cut, marker = risk_test,
+                   cause = 1, times = sort(times_ok), iid = TRUE)
+    auc_df <- data.frame(time = roc$times, AUC = roc$AUC)
+    print(auc_df, row.names = FALSE)
+    if (!any(abs(times_ok - 24) < 1e-6)) {
+      cat("Note: 24ヶ月は評価不可。最も近い時点で代替評価を表示しました。\n")
+    }
+  }
+}
+
+# 24か月AUCの件数チェック（参考）
+T_used <- if ("rfs_months" %in% names(tst)) tst$rfs_months else tst$time2y
+Delta  <- if ("rfs_event" %in% names(tst)) as.integer(tst$rfs_event==1) else tst$event2y
+cases_24    <- sum(T_used <= 24 & Delta == 1, na.rm = TRUE)
+controls_24 <- sum(T_used >  24,               na.rm = TRUE)
+cens_0_24   <- sum(T_used <= 24 & Delta == 0,  na.rm = TRUE)
+cat(sprintf("For AUC@24: cases=%d, controls=%d, censored_before=%d\n",
+            cases_24, controls_24, cens_0_24))
+
+# ---- 3) model_results に保存 -------------------------------------------------
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m1]] <- list(
+  model_name     = model_name_m1,
+  fit            = fit_step,
+  selected_terms = selected_terms_m1,
+  c_index        = c_index,
+  c_se           = c_se,
+  c_ci           = c_ci,
+  auc_df         = auc_df
+)
+
+```
+
+```{r}
+## ==== PATCH: save risk for ROC (M1_StepAIC_forward) =========================
+# Test 用のリスクスコアを保存（再計算しておく）
+risk_test <- as.numeric(predict(fit_step, newdata = tst, type = "lp"))
+stopifnot(length(risk_test) == nrow(tst))
+
+if (!exists("model_results")) model_results <- list()
+if (is.null(model_results[[model_name_m1]])) model_results[[model_name_m1]] <- list()
+
+model_results[[model_name_m1]]$model_name <- model_name_m1
+model_results[[model_name_m1]]$risk       <- risk_test      # ★ これが無くてスキップされていた
+model_results[[model_name_m1]]$c_index    <- c_index
+model_results[[model_name_m1]]$c_se       <- c_se
+model_results[[model_name_m1]]$c_ci       <- c_ci
+
+# AUC表が計算できていれば統一キーで保存
+if (exists("auc_df") && is.data.frame(auc_df)) {
+  model_results[[model_name_m1]]$auc_df <- auc_df
+}
+## ==== PATCH: save risk for ROC (M1_StepAIC_forward) =========================
+# Test 用のリスクスコアを保存（再計算しておく）
+risk_test <- as.numeric(predict(fit_step, newdata = tst, type = "lp"))
+stopifnot(length(risk_test) == nrow(tst))
+
+if (!exists("model_results")) model_results <- list()
+if (is.null(model_results[[model_name_m1]])) model_results[[model_name_m1]] <- list()
+
+model_results[[model_name_m1]]$model_name <- model_name_m1
+model_results[[model_name_m1]]$risk       <- risk_test      # ★ これが無くてスキップされていた
+model_results[[model_name_m1]]$c_index    <- c_index
+model_results[[model_name_m1]]$c_se       <- c_se
+model_results[[model_name_m1]]$c_ci       <- c_ci
+
+# AUC表が計算できていれば統一キーで保存
+if (exists("auc_df") && is.data.frame(auc_df)) {
+  model_results[[model_name_m1]]$auc_df <- auc_df
+}
+
+```
+
+
+```{r}
+# 24か月AUCに用いた T, Δ を明示して件数確認
+T_used <- if ("rfs_months" %in% names(tst)) tst$rfs_months else tst$time2y
+Delta  <- if ("rfs_event" %in% names(tst)) as.integer(tst$rfs_event==1) else tst$event2y
+
+cases_24    <- sum(T_used <= 24 & Delta == 1, na.rm = TRUE)
+controls_24 <- sum(T_used >  24,               na.rm = TRUE)
+cens_0_24   <- sum(T_used <= 24 & Delta == 0,  na.rm = TRUE)
+
+cat(sprintf("For AUC@24: cases=%d, controls=%d, censored_before=%d\n",
+            cases_24, controls_24, cens_0_24))
+
+```
+
+Although the test set was defined by a temporal split and includes recent cases, the 24-month AUC was computed with the time-dependent ROC (IPCW). This method only requires that some patients in the test set remain event-free under observation at 24 months (T > 24). In our test set, we had 63 cases (recurrence ≤ 24 months) and 60 controls with T > 24 months, enabling estimation of AUC at 24 months (AUC_24 = 0.727). Patients censored before 24 months contribute through IPCW but are not counted as controls.
+
+### Stepwise AIC, backward selection ###
+```{r}
+# *モデル2* Stepwise AIC, backward selection -------------------------------
+## ==== CHUNK3b: Model 2 — fit (backward) ====================================
+model_name_m2 <- "M2_StepAIC_backward"
+
+form_full <- as.formula(paste("Surv(time2y, event2y) ~", paste(preds, collapse = " + ")))
+fit_full  <- coxph(form_full, data = trv, x = TRUE, y = TRUE)
+
+fit_m2 <- stepAIC(fit_full, direction = "backward", trace = TRUE)
+
+cat(sprintf("\n[%s] Selected terms:\n", model_name_m2))
+print(attr(terms(fit_m2), "term.labels"))
+
+```
+```{r}
+## ==== CHUNK4b: Model 2 — evaluation on Test (C-index & TD-AUC) =============
+# 汎用の評価ヘルパ（今後の比較用に結果を返す）
+eval_model <- function(fit, newdata, label, times = c(6, 12, 18, 24)){
+  risk <- as.numeric(predict(fit, newdata = newdata, type = "lp"))  # 大きいほど高リスク
+
+  # Harrell's C（向き補正）＋bootstrap SE/CI
+  d_eval <- newdata; d_eval$risk <- risk
+  cobj   <- survival::concordance(Surv(time2y, event2y) ~ risk, data = d_eval, reverse = TRUE)
+  c_idx  <- as.numeric(cobj$concordance)
+
+  set.seed(20251102); B <- 500
+  c_boot <- replicate(B, {
+    idx <- sample.int(nrow(d_eval), replace = TRUE)
+    survival::concordance(Surv(d_eval$time2y[idx], d_eval$event2y[idx]) ~ d_eval$risk[idx],
+                          data = d_eval[idx, ], reverse = TRUE)$concordance
+  })
+  c_se  <- stats::sd(c_boot, na.rm = TRUE)
+  c_ci  <- c_idx + c(-1, 1) * 1.96 * c_se
+
+  cat(sprintf("\n[%s] Harrell's C = %.3f (SE=%.3f) 95%%CI [%.3f, %.3f]\n",
+              label, c_idx, c_se, c_ci[1], c_ci[2]))
+
+  # time-dependent AUC（rfs_months があればそちらで、可能な時点のみ）
+  auc_df <- NULL
+  if ("rfs_months" %in% names(newdata)) {
+    if ("rfs_event" %in% names(newdata)) {
+      delta_full <- as.integer(newdata$rfs_event == 1)
+    } else if ("recur_event" %in% names(newdata)) {
+      delta_full <- as.integer(newdata$recur_event == 1)
+    } else {
+      delta_full <- as.integer(newdata$recur_2y == TRUE)
+    }
+    T_full <- as.numeric(newdata$rfs_months)
+
+    ok <- vapply(times, function(t){
+      sum(T_full <= t & delta_full == 1, na.rm = TRUE) > 0 &&
+        sum(T_full >  t,                 na.rm = TRUE) > 0
+    }, logical(1))
+
+    if (any(ok)) {
+      roc <- timeROC(T = T_full, delta = delta_full, marker = risk,
+                     cause = 1, times = times[ok], iid = TRUE)
+      auc_df <- data.frame(model = label, time = roc$times, AUC = roc$AUC)
+      print(auc_df, row.names = FALSE)
+    } else {
+      cat(sprintf("[%s] TD-AUC: evaluable times not available in Test.\n", label))
+    }
+  } else {
+    cat(sprintf("[%s] TD-AUC: rfs_months not available; skipped.\n", label))
+  }
+
+  list(label = label, risk = risk, c_index = c_idx, c_se = c_se, c_ci = c_ci, auc = auc_df)
+}
+
+# 実行・保存（将来の比較用に蓄積）
+res_m2 <- eval_model(fit_m2, tst, model_name_m2)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m2]] <- res_m2
+
+```
+
+### Stepwise BIC, fackward selection ###
+```{r}
+# *モデル3* Stepwise BIC, forward selection ---------------------------------
+## ==== CHUNK3c: Model 3 — fit (BIC forward) ==================================
+model_name_m3 <- "M3_StepBIC_forward"
+
+bic_k <- log(nrow(trv))  # BIC penalty
+form_upper_bic <- as.formula(paste("Surv(time2y, event2y) ~", paste(preds, collapse = " + ")))
+fit0_bic       <- coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+
+fit_m3 <- stepAIC(fit0_bic,
+                  scope     = list(lower = ~1, upper = form_upper_bic),
+                  direction = "forward",
+                  k         = bic_k,
+                  trace     = TRUE)
+
+cat(sprintf("\n[%s] Selected terms:\n", model_name_m3))
+print(attr(terms(fit_m3), "term.labels"))
+
+```
+
+
+```{r}
+## ==== CHUNK4c: Model 3 — evaluation on Test (C-index & TD-AUC) =============
+res_m3 <- eval_model(fit_m3, tst, model_name_m3)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m3]] <- res_m3
+
+```
+
+### Stepwise BIC, backward selection ###
+```{r}
+# *モデル4* Stepwise BIC, backward selection ---------------------------------
+## ==== CHUNK3d: Model 4 — fit (BIC backward) =================================
+model_name_m4 <- "M4_StepBIC_backward"
+
+# BICペナルティは既出の bic_k を再利用（未定義なら作成）
+if (!exists("bic_k")) bic_k <- log(nrow(trv))
+
+form_full_bic <- as.formula(paste("Surv(time2y, event2y) ~", paste(preds, collapse = " + ")))
+fit_full_bic  <- coxph(form_full_bic, data = trv, x = TRUE, y = TRUE)
+
+fit_m4 <- stepAIC(fit_full_bic,
+                  direction = "backward",
+                  k         = bic_k,
+                  trace     = TRUE)
+
+cat(sprintf("\n[%s] Selected terms:\n", model_name_m4))
+print(attr(terms(fit_m4), "term.labels"))
+
+```
+
+```{r}
+## ==== CHUNK4d: Model 4 — evaluation on Test (C-index & TD-AUC) =============
+res_m4 <- eval_model(fit_m4, tst, model_name_m4)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m4]] <- res_m4
+
+```
+### Univariate screening to Stepwise (stopping rule: p < 0.1)
+```{r}
+# *モデル5* Univariate screening (p<0.1, robust) → Stepwise selection (stop p<0.05)
+## ==== CHUNK3e_fix: robust univariate screen + forward LRT stepwise ==========
+model_name_m5 <- "M5_Uni0.1_then_Step_p0.05_robust"
+
+# 単変量 p：まず Cox の LRT、ダメなら因子のみ log-rank で代替
+get_uni_p <- function(v){
+  x <- trv[[v]]
+  frm <- as.formula(paste("Surv(time2y, event2y) ~", v))
+  # Cox 単変量
+  p <- tryCatch({
+    fit <- coxph(frm, data = trv, x = TRUE, y = TRUE)
+    as.numeric(summary(fit)$logtest[3])  # LRT の p
+  }, error = function(e) NA_real_)
+  # フォールバック：因子で分離などにより p が NA のときは log-rank
+  if (!is.finite(p) && is.factor(x)) {
+    p <- tryCatch({
+      sd <- survdiff(Surv(trv$time2y, trv$event2y) ~ x, rho = 0)
+      stats::pchisq(sd$chisq, df = length(sd$n) - 1, lower.tail = FALSE)
+    }, error = function(e) NA_real_)
+  }
+  p
+}
+
+# 1) 単変量スクリーニング（p<0.10）
+uni_p2   <- setNames(vapply(preds, get_uni_p, numeric(1)), preds)
+uni_tbl2 <- data.frame(var = names(uni_p2), p = uni_p2) %>% dplyr::arrange(p)
+screened <- uni_tbl2$var[is.finite(uni_tbl2$p) & uni_tbl2$p < 0.10]
+if (!length(screened)) screened <- head(uni_tbl2$var[is.finite(uni_tbl2$p)], 5)
+
+cat(sprintf("\n[%s] Univariate screen: %d passed (p<0.10)\n", model_name_m5, length(screened)))
+print(head(uni_tbl2, 20), row.names = FALSE)
+
+# 2) 前進選択：現在モデル vs 追加モデル の LRT で最良 p < 0.05 を採用
+included  <- character(0)
+remaining <- screened
+
+repeat {
+  # 現在モデル
+  m0 <- if (length(included)) {
+    coxph(as.formula(paste("Surv(time2y, event2y) ~", paste(included, collapse = " + "))),
+          data = trv, x = TRUE, y = TRUE)
+  } else {
+    coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+  }
+
+  best_var <- NULL; best_p <- 1
+  for (v in remaining) {
+    f1 <- as.formula(paste("Surv(time2y, event2y) ~", paste(c(included, v), collapse = " + ")))
+    m1 <- tryCatch(coxph(f1, data = trv, x = TRUE, y = TRUE), error = function(e) NULL)
+    p_add <- tryCatch({
+      a <- anova(m0, m1, test = "Chisq")
+      as.numeric(a[2, ncol(a)])  # 2行目のP値（追加モデル）
+    }, error = function(e) NA_real_)
+    if (is.finite(p_add) && p_add < best_p) { best_p <- p_add; best_var <- v }
+  }
+  if (!is.null(best_var) && best_p < 0.05) {
+    included  <- c(included, best_var)
+    remaining <- setdiff(remaining, best_var)
+  } else {
+    break
+  }
+}
+
+# 3) 後向きクリーンアップ：入っている各項目の LRT p を再確認し p>=0.05 を除外
+repeat {
+  if (!length(included)) break
+  f_now <- as.formula(paste("Surv(time2y, event2y) ~", paste(included, collapse = " + ")))
+  m_now <- coxph(f_now, data = trv, x = TRUE, y = TRUE)
+  # drop1 は環境差が出るので anova(除外)で判定
+  pvec <- sapply(included, function(v){
+    f_drop <- as.formula(paste("Surv(time2y, event2y) ~",
+                               paste(setdiff(included, v), collapse = " + ")))
+    m_drop <- if (length(setdiff(included, v))) coxph(f_drop, data = trv, x = TRUE, y = TRUE)
+              else coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+    a <- tryCatch(anova(m_drop, m_now, test = "Chisq"), error = function(e) NULL)
+    if (is.null(a)) NA_real_ else as.numeric(a[2, ncol(a)])
+  })
+  worst <- names(which.max(pvec))
+  if (is.finite(pvec[worst]) && pvec[worst] >= 0.05) {
+    included <- setdiff(included, worst)
+  } else break
+}
+
+# 4) 最終モデルのフィット
+if (length(included)) {
+  f_final <- as.formula(paste("Surv(time2y, event2y) ~", paste(included, collapse = " + ")))
+  fit_m5r <- coxph(f_final, data = trv, x = TRUE, y = TRUE)
+} else {
+  fit_m5r <- coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+  message(sprintf("[%s] No variables selected; fitted Null model.", model_name_m5))
+}
+cat(sprintf("\n[%s] Selected terms:\n", model_name_m5)); print(included)
+
+```
+
+```{r}
+## ==== CHUNK4e_fix: Model 5 — evaluation on Test =============================
+res_m5 <- eval_model(fit_m5r, tst, model_name_m5)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m5]] <- res_m5
+```
+
+
+### Recursive selection ###
+```{r}
+# *モデル6* Recursive Feature Elimination (Cox, CV by C-index)
+## ==== CHUNK3f-helpers: safe fit / C-index / folds ===========================
+model_name_m6 <- "M6_RFE_Cox"
+
+safe_cox <- function(formula, data){
+  tryCatch(coxph(formula, data = data, x = TRUE, y = TRUE), error = function(e) NULL)
+}
+
+lrt_added_p <- function(m0, m1){
+  tryCatch({
+    a <- anova(m0, m1, test = "Chisq")
+    as.numeric(a[2, ncol(a)])  # 2行目のP
+  }, error = function(e) NA_real_)
+}
+
+cindex_on <- function(fit, df_val){
+  if (is.null(fit)) return(NA_real_)
+  risk <- tryCatch(as.numeric(predict(fit, newdata = df_val, type = "lp")), error = function(e) NA_real_)
+  if (!all(is.finite(risk))) return(NA_real_)
+  cobj <- tryCatch(survival::concordance(Surv(df_val$time2y, df_val$event2y) ~ risk,
+                                         data = df_val, reverse = TRUE),
+                   error = function(e) NULL)
+  if (is.null(cobj)) return(NA_real_)
+  as.numeric(cobj$concordance)
+}
+
+make_folds <- function(df, K = 5, seed = 20251102){
+  set.seed(seed)
+  f <- integer(nrow(df))
+  idx1 <- which(df$event2y == 1); idx0 <- which(df$event2y == 0)
+  f[idx1] <- sample(rep(1:K, length.out = length(idx1)))
+  f[idx0] <- sample(rep(1:K, length.out = length(idx0)))
+  f
+}
+```
+
+```{r}
+## ==== CHUNK3f-rank: backward LRTで重要度順（除去順）を作る ===================
+preds_rfe <- preds  # 既存predsを使用
+remove_order <- character(0)
+current <- preds_rfe
+
+# 初回フルモデル（失敗したら可能な限りで進める）
+fit_full <- safe_cox(as.formula(paste("Surv(time2y, event2y) ~", paste(current, collapse = " + "))), trv)
+
+while (length(current) > 0){
+  # 変数ごとの LRT p（その変数を除いたモデル vs 現在モデル）
+  pvec <- setNames(rep(NA_real_, length(current)), current)
+
+  for (v in current){
+    # m_drop: v を除外したモデル
+    kept <- setdiff(current, v)
+    m_drop <- if (length(kept)) safe_cox(as.formula(paste("Surv(time2y, event2y) ~",
+                                                          paste(kept, collapse = " + "))), trv)
+              else safe_cox(Surv(time2y, event2y) ~ 1, trv)
+    m_full <- if (!is.null(fit_full) && setequal(attr(terms(fit_full), "term.labels"), current)) {
+      fit_full
+    } else {
+      safe_cox(as.formula(paste("Surv(time2y, event2y) ~", paste(current, collapse = " + "))), trv)
+    }
+    pvec[v] <- lrt_added_p(m_drop, m_full)  # v を"加える価値"
+  }
+
+  # 最も寄与が小さい（pが最大 or NA）ものを1つ除去
+  worst <- names(which.max(ifelse(is.finite(pvec), pvec, Inf)))
+  remove_order <- c(remove_order, worst)
+  current <- setdiff(current, worst)
+
+  # 現在集合のフルモデルを更新
+  fit_full <- if (length(current)) safe_cox(as.formula(paste("Surv(time2y, event2y) ~",
+                                                             paste(current, collapse = " + "))), trv) else NULL
+}
+# remove_order が「落とす順」。サブセットkは：preds_rfe から先頭(m-k)個を除いたもの。
+m <- length(preds_rfe)
+
+```
+
+```{r}
+## ==== CHUNK3f-cv: サブセット毎に5-fold CVで平均C-index ======================
+K <- 5
+fold_id <- make_folds(trv, K = K)
+
+min_vars <- 5L
+subset_sizes <- seq(from = m, to = max(min_vars, 1L), by = -1L)  # m, m-1, ..., min_vars
+
+cv_results <- vector("list", length(subset_sizes))
+names(cv_results) <- paste0("k", subset_sizes)
+
+for (i in seq_along(subset_sizes)){
+  k <- subset_sizes[i]
+  # このサイズのサブセット
+  dropped <- if ((m - k) > 0) remove_order[1:(m - k)] else character(0)
+  vars_k  <- setdiff(preds_rfe, dropped)
+
+  # K-fold CV
+  c_fold <- rep(NA_real_, K)
+  for (fold in 1:K){
+    trn <- trv[fold_id != fold, , drop = FALSE]
+    val <- trv[fold_id == fold, , drop = FALSE]
+
+    fit_k <- if (length(vars_k)) {
+      safe_cox(as.formula(paste("Surv(time2y, event2y) ~", paste(vars_k, collapse = " + "))), trn)
+    } else {
+      safe_cox(Surv(time2y, event2y) ~ 1, trn)
+    }
+    c_fold[fold] <- cindex_on(fit_k, val)
+  }
+  cv_results[[i]] <- list(
+    nvar = k,
+    vars = vars_k,
+    c_mean = mean(c_fold, na.rm = TRUE),
+    c_se   = stats::sd(c_fold, na.rm = TRUE) / sqrt(sum(is.finite(c_fold)))
+  )
+}
+cv_tab <- do.call(rbind, lapply(cv_results, as.data.frame))
+row.names(cv_tab) <- NULL
+cv_tab <- cv_tab[order(-cv_tab$nvar), ]  # 大きい→小さい順に表示
+print(cv_tab[, c("nvar","c_mean","c_se")], row.names = FALSE)
+
+```
+
+```{r}
+## ==== CHUNK3f-select: 1-SE ルールで最良サブセットを選択 ======================
+# ベスト平均CとそのSE
+best_idx <- which.max(cv_tab$c_mean)
+best_mean <- cv_tab$c_mean[best_idx]
+best_se   <- cv_tab$c_se[best_idx]
+thr <- best_mean - best_se  # 1-SE ルール
+
+# しきい値以上を満たす中で "最も少ない変数数" を採択
+eligible <- which(cv_tab$c_mean >= thr)
+pick_idx <- eligible[which.min(cv_tab$nvar[eligible])]
+
+sel_nvar <- cv_tab$nvar[pick_idx]
+sel_vars <- cv_results[[ match(paste0("k", sel_nvar), names(cv_results)) ]]$vars
+
+cat(sprintf("\n[%s] Selected by 1-SE rule: nvar=%d  (best_mean=%.3f, 1SE=%.3f, threshold=%.3f)\n",
+            model_name_m6, sel_nvar, best_mean, best_se, thr))
+print(sel_vars)
+
+```
+```{r}
+## ==== CHUNK3f-fit: 最終モデルを学習 ==========================================
+if (length(sel_vars)) {
+  form_final <- as.formula(paste("Surv(time2y, event2y) ~", paste(sel_vars, collapse = " + ")))
+  fit_m6 <- safe_cox(form_final, trv)
+} else {
+  fit_m6 <- safe_cox(Surv(time2y, event2y) ~ 1, trv)
+  message(sprintf("[%s] No variables selected; fitted Null model.", model_name_m6))
+}
+
+```
+
+```{r}
+## ==== CHUNK4f: Test評価 & 保存（C-index & TD-AUC, 6/12/18/24m） =============
+res_m6 <- eval_model(fit_m6, tst, model_name_m6)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m6]] <- res_m6
+
+# 参考：CV曲線を後で図示しやすいように保持
+cv_curve_m6 <- cv_tab
+
+```
+
+### LASSO (λをvalidation setでoptimize) ###
+```{r}
+## ==== CHUNK M7-0: add package (glmnet) & light checks =======================
+suppressPackageStartupMessages({ library(glmnet) })
+stopifnot(exists("ds09_train"), exists("ds09_val"), exists("ds09_test"),
+          exists("preds"), exists("prep_surv"), exists("eval_model"))
+
+# 個別に Train/Val を用意（既存の関数を再利用）
+trn <- prep_surv(ds09_train)
+val <- prep_surv(ds09_val)
+```
+
+```{r}
+## ==== CHUNK M7-1: design matrix helpers & build X for glmnet (Train→Val) ===
+# Trainの因子レベルを基準に Val/Test を整列
+to_fac_trn <- vapply(trn[preds], function(x) is.factor(x) || is.character(x) || is.logical(x), logical(1))
+# factor化（Train）
+trn[preds[to_fac_trn]] <- lapply(trn[preds[to_fac_trn]], factor)
+# Val/Test を Train の levels に揃える
+val[preds[to_fac_trn]] <- Map(function(x, lev) factor(x, levels = lev),
+                              val[preds[to_fac_trn]], lapply(trn[preds[to_fac_trn]], levels))
+tst[preds[to_fac_trn]] <- Map(function(x, lev) factor(x, levels = lev),
+                              tst[preds[to_fac_trn]], lapply(trn[preds[to_fac_trn]], levels))
+
+# model.matrix 生成（Trainで列設計を決める；切片列は除外）
+form_x <- as.formula(paste("~", paste(preds, collapse = " + ")))
+mmake <- function(df){
+  mm <- model.matrix(form_x, data = df)
+  mm[, colnames(mm) != "(Intercept)", drop = FALSE]
+}
+X_tr <- mmake(trn)
+
+# Val/Test を Train 列に合わせる（無い列は0で追加・順序を揃える）
+align_to <- function(X_new, X_ref){
+  miss <- setdiff(colnames(X_ref), colnames(X_new))
+  if (length(miss)) {
+    add <- matrix(0, nrow = nrow(X_new), ncol = length(miss),
+                  dimnames = list(NULL, miss))
+    X_new <- cbind(X_new, add)
+  }
+  X_new[, colnames(X_ref), drop = FALSE]
+}
+X_val <- align_to(mmake(val), X_tr)
+# Test は post-LASSO Cox 用なのでここでは不要（後段で eval_model がデータフレームから作る）
+```
+
+
+```{r}
+## ==== CHUNK M7-2: fit LASSO path on Train; pick λ by Val C-index ============
+set.seed(20251102)
+y_tr <- with(trn, Surv(time2y, event2y))
+
+# 0分散列を落とす（稀対策）
+zv <- which(apply(X_tr, 2, sd, na.rm = TRUE) == 0)
+if (length(zv)) {
+  X_tr  <- X_tr[, -zv, drop = FALSE]
+  X_val <- X_val[, colnames(X_tr), drop = FALSE]  # 整列
+}
+
+fit_glmnet <- glmnet(x = X_tr, y = y_tr, family = "cox", alpha = 1, standardize = TRUE)
+
+# Val の C-index を各 λ で評価（高いほど良い；tieは大きいλ優先でスパースに）
+lams <- fit_glmnet$lambda
+val_c <- sapply(lams, function(s){
+  risk_val <- as.numeric(predict(fit_glmnet, newx = X_val, s = s, type = "link"))
+  cobj <- survival::concordance(Surv(val$time2y, val$event2y) ~ risk_val,
+                                data = val, reverse = TRUE)
+  as.numeric(cobj$concordance)
+})
+
+best_idx <- which.max(val_c)
+# 同等（±1e-3）ならより大きいλを採用
+eps <- 1e-3
+cand <- which(val_c >= (val_c[best_idx] - eps))
+lambda_star <- max(lams[cand])
+cval_star   <- val_c[which(lams == lambda_star)]
+
+cat(sprintf("[M7] LASSO selection: best λ = %.6f  (Val C-index = %.3f)\n",
+            lambda_star, cval_star))
+
+```
+
+
+```{r}
+## ==== CHUNK M7-3: extract selected variables at λ* (map to original vars) ===
+# 係数（列は X_tr の列名 = ダミー含む）
+beta_hat <- as.matrix(coef(fit_glmnet, s = lambda_star))
+nz_idx   <- which(abs(beta_hat) > 0)
+nz_cols  <- rownames(beta_hat)[nz_idx]
+
+# model.matrix の "assign" 属性で列→元変数を取得
+mm_tmp     <- model.matrix(form_x, data = trn)  # (Intercept)含む
+assign_vec <- attr(mm_tmp, "assign")            # 各列がどの term か（0 は切片）
+term_labs  <- attr(terms(form_x), "term.labels")
+# 切片を除いた部分の assign を対応づけ
+assign_noint <- assign_vec[colnames(mm_tmp) != "(Intercept)"]
+orig_var_by_col <- term_labs[ assign_noint ]    # 長さ = ncol(X_tr) と一致
+
+# 選択された元変数（ダミー列→親変数に集約）
+sel_vars <- unique(orig_var_by_col[ match(nz_cols, colnames(X_tr)) ])
+sel_vars <- sel_vars[!is.na(sel_vars)]
+
+cat(sprintf("[M7] Non-zero variables at λ*: %d vars\n", length(sel_vars)))
+print(sel_vars)
+
+```
+
+```{r}
+## ==== CHUNK M7-4: post-LASSO Cox on Train+Val, then Test evaluation =========
+model_name_m7 <- "M7_LASSO_postCox"
+
+if (length(sel_vars)) {
+  form_post <- as.formula(paste("Surv(time2y, event2y) ~", paste(sel_vars, collapse = " + ")))
+  fit_m7 <- coxph(form_post, data = trv, x = TRUE, y = TRUE)
+} else {
+  fit_m7 <- coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+  message("[M7] No variables selected by LASSO; fitted Null Cox.")
+}
+
+# Test で評価（既存ヘルパを利用）
+res_m7 <- eval_model(fit_m7, tst, model_name_m7)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m7]] <- c(res_m7,
+                                    list(lambda_star = lambda_star,
+                                         val_cindex  = cval_star,
+                                         selected_vars = sel_vars))
+
+```
+データ可視化
+```{r}
+## ==== CHUNK M7-fig-simple (fixed): x = log(lambda), y = coefficients =========
+stopifnot(exists("fit_glmnet"))
+
+op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+par(mar = c(4,4,2,1))
+
+# glmnet標準: x軸は log(lambda)（負の値が右へ行くほど大きくなる）
+plot(fit_glmnet, xvar = "lambda", label = FALSE, sign.lambda = 1)
+title(main = "LASSO coefficient paths (Cox) — x = log(λ)")
+
+# 参考: 選択λ*の位置
+if (exists("lambda_star")) {
+  abline(v = log(lambda_star), lty = 2, lwd = 2)
+}
+
+```
+
+
+### LASSO (最終的な変数を4-6になるように)###
+```{r}
+## ==== CHUNK M7K-0: 前提チェック & 下準備（glmnet, データ分割） ================
+suppressPackageStartupMessages({ if (!"glmnet" %in% .packages()) library(glmnet) })
+
+stopifnot(exists("ds09_train"), exists("ds09_val"), exists("ds09_test"), exists("preds"))
+if (!exists("prep_surv")) stop("prep_surv() が見つかりません。前チャンクを実行してください。")
+if (!exists("eval_model")) stop("eval_model() が見つかりません。前チャンクを実行してください。")
+
+# Train/Val/Test のSurv-ready版（既に trv/tst があれば再作成しません）
+if (!exists("trn")) trn <- prep_surv(ds09_train)
+if (!exists("val")) val <- prep_surv(ds09_val)
+if (!exists("tst")) tst <- prep_surv(ds09_test)
+if (!exists("trv")) trv <- dplyr::bind_rows(trn, val)
+
+# 目標の“親変数”個数レンジ（因子は1親としてカウント）
+k_target <- c(4L, 6L)
+set.seed(20251102)
+
+```
+
+
+```{r}
+## ==== CHUNK M7K-1: model.matrix 設計 & 親変数マッピング（Train基準） =========
+# Trainを基準に因子レベルを固定
+to_fac_trn <- vapply(trn[preds], function(x) is.factor(x) || is.character(x) || is.logical(x), logical(1))
+trn[preds[to_fac_trn]] <- lapply(trn[preds[to_fac_trn]], factor)
+val[preds[to_fac_trn]] <- Map(function(x, lev) factor(x, levels = lev),
+                              val[preds[to_fac_trn]], lapply(trn[preds[to_fac_trn]], levels))
+tst[preds[to_fac_trn]] <- Map(function(x, lev) factor(x, levels = lev),
+                              tst[preds[to_fac_trn]], lapply(trn[preds[to_fac_trn]], levels))
+
+form_x  <- as.formula(paste("~", paste(preds, collapse = " + ")))
+
+# model.matrix（切片列は除外）
+mmake <- function(df){
+  mm <- model.matrix(form_x, data = df)
+  mm[, colnames(mm) != "(Intercept)", drop = FALSE]
+}
+X_tr  <- mmake(trn)
+X_val <- mmake(val)
+
+# Train列を基準に Val を整列（足りない列は0補完）
+align_to <- function(X_new, X_ref){
+  miss <- setdiff(colnames(X_ref), colnames(X_new))
+  if (length(miss)) {
+    add <- matrix(0, nrow = nrow(X_new), ncol = length(miss), dimnames = list(NULL, miss))
+    X_new <- cbind(X_new, add)
+  }
+  X_new[, colnames(X_ref), drop = FALSE]
+}
+X_val <- align_to(X_val, X_tr)
+
+# 親変数（ダミー→親）対応ベクタ（X_trの列順と一致）
+## ==== FIX for CHUNK M7K-1: parent_by_col を列名付きで作る ====================
+form_x <- as.formula(paste("~", paste(preds, collapse = " + ")))
+
+# 単一の model.matrix から X_tr と assign を同時に取得
+MM_all <- model.matrix(form_x, data = trn)              # (Intercept) 含む
+keep   <- colnames(MM_all) != "(Intercept)"
+X_tr   <- MM_all[, keep, drop = FALSE]                  # これが学習用デザイン行列
+
+assign_v  <- attr(MM_all, "assign")[keep]               # 列ごとの term 番号（切片を除外）
+term_lb   <- attr(terms(form_x), "term.labels")
+parent_by_col <- setNames(term_lb[assign_v], colnames(X_tr))  # ★列名を names にセット
+
+# 確認（ここで落ちなければOK）
+stopifnot(identical(colnames(X_tr), names(parent_by_col)))
+
+# 0分散は事前に落とす（稀対策）
+zv <- which(apply(X_tr, 2, sd, na.rm = TRUE) == 0)
+if (length(zv)) {
+  X_tr  <- X_tr[, -zv, drop = FALSE]
+  X_val <- X_val[, colnames(X_tr), drop = FALSE]
+  parent_by_col <- parent_by_col[colnames(X_tr)]
+}
+
+```
+
+
+```{r}
+## ==== CHUNK M7K-2: LASSOパス学習（Train） & 親変数個数のカウント ==============
+y_tr <- with(trn, Surv(time2y, event2y))
+fit_glmnet <- glmnet(x = X_tr, y = y_tr, family = "cox", alpha = 1, standardize = TRUE)
+
+lams   <- fit_glmnet$lambda
+# 各λで非ゼロ列→親に集約→親のユニーク数を数える
+parent_count <- vapply(seq_along(lams), function(j){
+  b  <- as.matrix(fit_glmnet$beta)[, j, drop = TRUE]
+  nz <- names(b)[which(abs(b) > 0)]
+  if (!length(nz)) return(0L)
+  length(unique(parent_by_col[nz]))
+}, integer(1))
+
+lambda_grid <- data.frame(
+  idx = seq_along(lams),
+  lambda = lams,
+  n_parent = parent_count,
+  stringsAsFactors = FALSE
+)
+print(head(lambda_grid, 10))
+
+```
+
+
+```{r}
+## ==== CHUNK M7K-3: 目標(4–6親変数)を満たすλをVal C-indexで選択（無ければ範囲拡張） ==
+# ValでのC-index（Harrell, reverse=TRUE）を計算する関数
+val_cindex_at <- function(lam){
+  risk <- as.numeric(predict(fit_glmnet, newx = X_val, s = lam, type = "link"))
+  cobj <- survival::concordance(Surv(val$time2y, val$event2y) ~ risk, data = val, reverse = TRUE)
+  as.numeric(cobj$concordance)
+}
+
+# 範囲を広げながら候補λを探索
+L0 <- k_target[1]; U0 <- k_target[2]
+best <- NULL
+for (wid in 0:6) {  # 最大±6まで緩める（必要なら調整）
+  L <- max(1L, L0 - wid); U <- U0 + wid
+  cand_idx <- which(lambda_grid$n_parent >= L & lambda_grid$n_parent <= U)
+  if (!length(cand_idx)) next
+
+  cand <- lambda_grid[cand_idx, , drop = FALSE]
+  cand$val_c <- vapply(cand$lambda, val_cindex_at, numeric(1))
+  # ↑ 数値が出ない/NAなら外す
+  cand <- cand[is.finite(cand$val_c), , drop = FALSE]
+  if (!nrow(cand)) next
+
+  # 最良：Val C最大。同点はより大きいλ（=スパース）を優先
+  i_best <- with(cand, order(-val_c, -lambda))[1]
+  best <- cand[i_best, , drop = FALSE]
+  attr(best, "search_range") <- c(L, U)
+  break
+}
+if (is.null(best)) stop("候補となる λ が見つかりませんでした。")
+
+lambda_star <- best$lambda
+n_parent_star <- best$n_parent
+cval_star <- best$val_c
+cat(sprintf("[M7K] selected λ* = %.6f  (parents=%d within [%d,%d], Val C=%.3f)\n",
+            lambda_star, n_parent_star, attr(best, "search_range")[1], attr(best, "search_range")[2], cval_star))
+
+```
+
+
+```{r}
+## ==== CHUNK M7K-4: λ*で残った“親変数”を列挙（因子は親で採択） ================
+beta_star <- as.matrix(coef(fit_glmnet, s = lambda_star))
+nz_cols   <- rownames(beta_star)[which(abs(beta_star) > 0)]
+sel_parents <- unique(parent_by_col[nz_cols])
+sel_parents <- sel_parents[!is.na(sel_parents)]
+
+cat(sprintf("[M7K] Non-zero parents at λ*: n=%d\n", length(sel_parents)))
+print(sel_parents)
+
+```
+
+```{r}
+## ==== CHUNK M7K-5: post-LASSO Cox（Train+Val）→ Test評価 =====================
+model_name_m7k <- sprintf("M7_LASSO_postCox_targetK_%dto%d", k_target[1], k_target[2])
+
+if (length(sel_parents)) {
+  f_post <- as.formula(paste("Surv(time2y, event2y) ~", paste(sel_parents, collapse = " + ")))
+  fit_m7k <- coxph(f_post, data = trv, x = TRUE, y = TRUE)
+} else {
+  fit_m7k <- coxph(Surv(time2y, event2y) ~ 1, data = trv, x = TRUE, y = TRUE)
+  message("[M7K] λ*で親変数が選択されず、Null Cox を学習しました。")
+}
+
+res_m7k <- eval_model(fit_m7k, tst, model_name_m7k)
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m7k]] <- c(res_m7k,
+                                     list(lambda_star = lambda_star,
+                                          n_parent_star = n_parent_star,
+                                          val_cindex = cval_star,
+                                          selected_parents = sel_parents,
+                                          lambda_grid = lambda_grid))
+
+```
+
+```{r}
+## ==== CHUNK M8: Cox with {stage_diag, t, im, ALBIscore} =====================
+model_name_m8 <- "M8_StageT_IM_ALBI"
+vars_m8 <- c("stage_diag","t","im","ALBIscore")
+
+# 存在チェック
+miss <- setdiff(vars_m8, names(trv))
+stopifnot(length(miss) == 0)
+
+# 因子レベルの整合（文字/論理/因子）
+fac_m8 <- vars_m8[vapply(trv[vars_m8], \(x) is.character(x) || is.logical(x) || is.factor(x), TRUE)]
+if (length(fac_m8)){
+  trv[fac_m8] <- lapply(trv[fac_m8], factor)
+  for (v in fac_m8){
+    tst[[v]] <- factor(tst[[v]], levels = levels(trv[[v]]))
+  }
+}
+
+# フォーミュラ & 学習
+form_m8 <- as.formula(sprintf("Surv(time2y, event2y) ~ %s", paste(vars_m8, collapse = " + ")))
+fit_m8  <- coxph(form_m8, data = trv, x = TRUE, y = TRUE)
+
+# Test 予測（線形予測子＝高いほど高リスク）
+risk_m8 <- as.numeric(predict(fit_m8, newdata = tst, type = "lp"))
+
+# ---- C-index（向き補正） + bootstrap SE/CI ----
+d_eval <- within(tst, { risk <- risk_m8 })
+cobj_m8 <- survival::concordance(Surv(time2y, event2y) ~ risk, data = d_eval, reverse = TRUE)
+c_index_m8 <- as.numeric(cobj_m8$concordance)
+
+set.seed(20251102)
+B <- 500
+c_boot_m8 <- replicate(B, {
+  idx <- sample.int(nrow(d_eval), replace = TRUE)
+  survival::concordance(Surv(d_eval$time2y[idx], d_eval$event2y[idx]) ~ d_eval$risk[idx],
+                        reverse = TRUE)$concordance
+})
+c_se_m8 <- stats::sd(c_boot_m8, na.rm = TRUE)
+c_ci_m8 <- c_index_m8 + c(-1,1)*1.96*c_se_m8
+
+cat(sprintf("[M8] C-index = %.3f (SE = %.3f), 95%% CI [%.3f, %.3f]\n",
+            c_index_m8, c_se_m8, c_ci_m8[1], c_ci_m8[2]))
+
+# ---- Time-dependent AUC（24m優先、無理なら 18/12/6 にフォールバック） ----
+T_used <- if ("rfs_months" %in% names(tst)) as.numeric(tst$rfs_months) else as.numeric(tst$time2y)
+Delta  <- if ("rfs_event"  %in% names(tst)) as.integer(tst$rfs_event==1) else as.integer(tst$event2y)
+
+times_try <- c(24,18,12,6)
+ok <- vapply(times_try, function(t){
+  sum(T_used <= t & Delta == 1, na.rm = TRUE) > 0 &&
+    sum(T_used >  t,             na.rm = TRUE) > 0
+}, logical(1))
+times_ok <- sort(times_try[ok])
+
+auc_df_m8 <- NULL; auc24_m8 <- NA_real_
+if (length(times_ok)){
+  roc_m8 <- timeROC(T = T_used, delta = Delta, marker = risk_m8,
+                    cause = 1, times = times_ok, iid = TRUE)
+  auc_df_m8 <- data.frame(time = roc_m8$times, AUC = roc_m8$AUC)
+  print(auc_df_m8, row.names = FALSE)
+  if (24 %in% roc_m8$times) {
+    auc24_m8 <- roc_m8$AUC[roc_m8$times == 24]
+  } else {
+    cat("[M8] Note: 24ヶ月は評価不可。最も近い時点のみ表示しています。\n")
+  }
+} else {
+  cat("[M8] TD-AUC: Test セットに評価可能な時点がありません（controls不足/追跡不足）。\n")
+}
+
+# 24mの件数確認（査読対応用）
+cases_24    <- sum(T_used <= 24 & Delta == 1, na.rm = TRUE)
+controls_24 <- sum(T_used >  24,               na.rm = TRUE)
+cens_0_24   <- sum(T_used <= 24 & Delta == 0,  na.rm = TRUE)
+cat(sprintf("[M8] For AUC@24: cases=%d, controls=%d, censored_before=%d\n",
+            cases_24, controls_24, cens_0_24))
+
+# model_results に保存
+if (!exists("model_results")) model_results <- list()
+model_results[[model_name_m8]] <- list(
+  label          = model_name_m8,
+  fit            = fit_m8,
+  selected_terms = vars_m8,
+  risk           = risk_m8,
+  c_index        = c_index_m8,
+  c_se           = c_se_m8,
+  c_ci           = c_ci_m8,
+  auc_df         = auc_df_m8
+)
+
+```
+
+
+### Data visualization ###
+```{r}
+## ==== AUC表を標準キー 'auc_df' に統一して保存（無ければ再計算） ===============
+suppressPackageStartupMessages(library(timeROC))
+
+# 24m AUCに使う T, Δ はここで統一（あなたが使っているルールに合わせています）
+T_used <- if ("rfs_months" %in% names(tst)) as.numeric(tst$rfs_months) else as.numeric(tst$time2y)
+Delta  <- if ("rfs_event"  %in% names(tst)) as.integer(tst$rfs_event==1) else as.integer(tst$event2y)
+
+times_try <- c(24, 18, 12, 6)  # 24mが無理な場合は自動で下に落ちます
+
+for (m in names(model_results)){
+  res <- model_results[[m]]
+
+  # 既に auc_df があるならスキップ
+  if (is.data.frame(res$auc_df)) next
+
+  # 1) auc が timeROC ならそこから表を作る
+  if (inherits(res$auc, "timeROC")){
+    model_results[[m]]$auc_df <- data.frame(time = res$auc$times, AUC = res$auc$AUC)
+    next
+  }
+
+  # 2) auc が data.frame（time, AUC列がある）ならそのまま採用
+  if (is.data.frame(res$auc)) {
+    tc <- names(res$auc)[grepl("time|month", names(res$auc), ignore.case = TRUE)][1]
+    ac <- names(res$auc)[grepl("^auc$",      names(res$auc), ignore.case = TRUE)][1]
+    if (!is.na(tc) && !is.na(ac)) {
+      model_results[[m]]$auc_df <- data.frame(time = as.numeric(res$auc[[tc]]),
+                                              AUC  = as.numeric(res$auc[[ac]]))
+      next
+    }
+  }
+
+  # 3) リスクスコアが保存されている場合は、ここで timeROC を再計算して保存
+  if (!is.null(res$risk) && is.numeric(res$risk) && length(res$risk) == length(T_used)) {
+    ok <- vapply(times_try, function(t){
+      sum(T_used <= t & Delta == 1, na.rm = TRUE) > 0 &&
+        sum(T_used >  t,             na.rm = TRUE) > 0
+    }, logical(1))
+    times_ok <- sort(times_try[ok])
+    if (length(times_ok)) {
+      roc <- timeROC(T = T_used, delta = Delta, marker = res$risk,
+                     cause = 1, times = times_ok, iid = TRUE)
+      model_results[[m]]$auc_df <- data.frame(time = roc$times, AUC = roc$AUC)
+    } else {
+      message(sprintf("[AUC-REPAIR] '%s': 評価可能な時点がありませんでした。", m))
+    }
+  } else {
+    message(sprintf("[AUC-REPAIR] '%s': risk が保存されていないため再計算不可。", m))
+  }
+}
+
+```
+
+```{r}
+## ==== CHUNK SUM-1: 取り出しヘルパ & サマリー表の作成 =========================
+stopifnot(exists("model_results"))
+
+# 数値を安全に取り出すヘルパ
+get_num <- function(x, keys, default = NA_real_) {
+  for (k in keys) {
+    if (!is.null(x[[k]]) && is.numeric(x[[k]]) && length(x[[k]]) >= 1) {
+      v <- as.numeric(x[[k]][1])
+      if (is.finite(v)) return(v)
+    }
+  }
+  default
+}
+get_ci <- function(x) {
+  # c_ci (長さ2) or c_lo/c_hi 形式を吸収
+  if (!is.null(x$c_ci) && is.numeric(x$c_ci) && length(x$c_ci) >= 2) {
+    c(as.numeric(x$c_ci[1]), as.numeric(x$c_ci[2]))
+  } else if (!is.null(x$c_lo) && !is.null(x$c_hi)) {
+    c(as.numeric(x$c_lo), as.numeric(x$c_hi))
+  } else {
+    c(NA_real_, NA_real_)
+  }
+}
+# AUCテーブル（列名が time/AUC でなくても拾う）
+get_auc_tbl <- function(x) {
+  cand <- c("auc_df","td_auc","auc_tbl","time_auc","roc_tbl")
+  for (k in cand) {
+    df <- x[[k]]
+    if (is.data.frame(df) && nrow(df) > 0) {
+      # time 列を推定
+      tc <- names(df)[grepl("time", names(df), ignore.case = TRUE)][1]
+      ac <- names(df)[grepl("^auc$", names(df), ignore.case = TRUE)][1]
+      if (!is.na(tc) && !is.na(ac)) {
+        out <- data.frame(time = as.numeric(df[[tc]]),
+                          AUC  = as.numeric(df[[ac]]))
+        return(out)
+      }
+    }
+  }
+  NULL
+}
+# AUC@24m（無ければ最も近い点、±0.6月以内のみ。なければ NA）
+get_auc24 <- function(x) {
+  df <- get_auc_tbl(x)
+  if (is.null(df)) return(NA_real_)
+  idx_exact <- which(abs(df$time - 24) < 1e-6)
+  if (length(idx_exact)) return(df$AUC[idx_exact[1]])
+  # 近い点（±0.6m）だけ許可
+  j <- which.min(abs(df$time - 24))
+  if (length(j) && abs(df$time[j] - 24) <= 0.6) return(df$AUC[j])
+  NA_real_
+}
+
+# まとめる
+mods <- names(model_results)
+summ_rows <- lapply(mods, function(m){
+  res <- model_results[[m]]
+  cidx <- get_num(res, c("c_index","cidx","concordance"))
+  se   <- get_num(res, c("c_se","se","std.err"))
+  ci   <- get_ci(res)
+  # SE が無ければ CI から逆算
+  if (!is.finite(se) && all(is.finite(ci))) se <- (ci[2] - ci[1]) / (2*1.96)
+  auc24 <- get_auc24(res)
+  data.frame(
+    model = m,
+    c_index = cidx,
+    c_se = se,
+    c_lo = if (is.finite(cidx) && is.finite(se)) cidx - 1.96*se else ci[1],
+    c_hi = if (is.finite(cidx) && is.finite(se)) cidx + 1.96*se else ci[2],
+    auc24 = auc24,
+    stringsAsFactors = FALSE
+  )
+})
+model_summary <- do.call(rbind, summ_rows)
+
+# 並べ替え（AUC@24 → C-index）
+ord <- order(-ifelse(is.finite(model_summary$auc24), model_summary$auc24, -Inf),
+             -ifelse(is.finite(model_summary$c_index), model_summary$c_index, -Inf))
+model_summary <- model_summary[ord, ]
+row.names(model_summary) <- NULL
+
+print(model_summary)
+
+```
+
+```{r}
+## ==== ROC-1: timeROC を各モデルで再計算（t=24mを優先, なければ最も近い点） ====
+suppressPackageStartupMessages(library(timeROC))
+
+stopifnot(exists("model_results"), exists("tst"))
+
+# 使う時間・イベント（あなたのルールに合わせています）
+T_used <- if ("rfs_months" %in% names(tst)) as.numeric(tst$rfs_months) else as.numeric(tst$time2y)
+Delta  <- if ("rfs_event"  %in% names(tst)) as.integer(tst$rfs_event==1) else as.integer(tst$event2y)
+
+# まず 24m を試し、無理なら 18/12/6m へフォールバック
+times_try <- c(24, 18, 12, 6)
+tol_near  <- 0.6  # 24mに最も近い点を許可する許容幅（月）
+
+roc_list <- list()
+
+for (m in names(model_results)){
+  res <- model_results[[m]]
+  if (is.null(res$risk) || !is.numeric(res$risk) || length(res$risk) != length(T_used)) {
+    message(sprintf("[ROC] skip '%s': risk が保存されていません。", m))
+    next
+  }
+  # 評価可能な時点を決定（cases>0 & controls>0）
+  ok <- vapply(times_try, function(t){
+    sum(T_used <= t & Delta == 1, na.rm = TRUE) > 0 &&
+      sum(T_used >  t,             na.rm = TRUE) > 0
+  }, logical(1))
+  times_ok <- sort(times_try[ok])
+  if (!length(times_ok)) {
+    message(sprintf("[ROC] skip '%s': 評価可能な時点がありません。", m))
+    next
+  }
+
+  roc <- timeROC(T = T_used, delta = Delta, marker = res$risk,
+                 cause = 1, times = times_ok, iid = TRUE)
+
+  # 表示に使う時点：24mがあればそれ、なければ最も近い時点（tol以内）
+  if (24 %in% roc$times) {
+    t_show <- 24
+    auc_show <- roc$AUC[roc$times == 24]
+  } else {
+    j <- which.min(abs(roc$times - 24))
+    if (abs(roc$times[j] - 24) <= tol_near) {
+      t_show <- roc$times[j]
+      auc_show <- roc$AUC[j]
+    } else {
+      # 近い点が tol を超えるなら、一番右（最大のt）を採用
+      j <- which.max(roc$times)
+      t_show <- roc$times[j]
+      auc_show <- roc$AUC[j]
+    }
+  }
+
+  roc_list[[m]] <- list(model = m, roc = roc, t_show = t_show, auc = as.numeric(auc_show))
+  # ついでに統一キー auc_df が無ければ保存（以後の表作成で拾える）
+  if (is.null(res$auc_df)) model_results[[m]]$auc_df <- data.frame(time = roc$times, AUC = roc$AUC)
+}
+
+```
+
+```{r}
+## ==== ROC-2: 複数モデルの ROC を一枚に重ね描き（凡例に AUC と評価時点を表示） ====
+if (!length(roc_list)) {
+  message("描画できるモデルがありません（riskが未保存か、評価可能時点が無い）。")
+} else {
+  op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+  par(mar = c(5,5,3,2))
+
+  models <- names(roc_list)
+  cols <- grDevices::rainbow(length(models))
+  lwd  <- 2
+
+  # 1本目を描画（timeROC の plot メソッドを利用）
+  m1 <- models[1]
+  plot(roc_list[[m1]]$roc, time = roc_list[[m1]]$t_show,
+       col = cols[1], lwd = lwd,
+       xlab = "False Positive Rate (1 - Specificity)",
+       ylab = "True Positive Rate (Sensitivity)",
+       title = FALSE)
+  title(main = "Time-dependent ROC curves on Test set")
+  abline(0, 1, lty = 3, col = "gray60")
+
+  # 2本目以降は add=TRUE で重ねる（もし add が未対応なら後段のフォールバックで描画）
+  add_ok <- TRUE
+  for (i in 2:length(models)) {
+    mi <- models[i]
+    tryCatch({
+      plot(roc_list[[mi]]$roc, time = roc_list[[mi]]$t_show,
+           add = TRUE, col = cols[i], lwd = lwd)
+    }, error = function(e){
+      add_ok <<- FALSE
+    })
+  }
+
+  # フォールバック：手動で FP/TP を抽出して lines()
+  if (!add_ok) {
+    message("plot.add が使えない環境のため、手動で線を重ねます。")
+    # すでに1本目は出ているので、2本目以降を FP/TP から線で追加
+    for (i in 2:length(models)) {
+      mi <- models[i]; obj <- roc_list[[mi]]$roc
+      ti <- roc_list[[mi]]$t_show
+      k  <- which(obj$times == ti)
+      # timeROC は FP/TP が列方向に times、行方向に閾値
+      FP <- if (!is.null(obj$FP)) obj$FP[, k] else if (!is.null(obj$FP_t)) obj$FP_t[, k] else NULL
+      TP <- if (!is.null(obj$TP)) obj$TP[, k] else if (!is.null(obj$TP_t)) obj$TP_t[, k] else NULL
+      if (!is.null(FP) && !is.null(TP)) {
+        lines(FP, TP, col = cols[i], lwd = lwd)
+      }
+    }
+  }
+
+  # 凡例（モデル名 + AUC@t）
+  lgd <- vapply(models, function(m){
+    sprintf("%s  (AUC@%s m = %.3f)", m, format(roc_list[[m]]$t_show, trim=TRUE), roc_list[[m]]$auc)
+  }, FUN.VALUE = "")
+  legend("bottomright", legend = lgd, col = cols, lwd = lwd, cex = 0.8, bg = "white")
+}
+
+```
+# 出力
+```{r}
+## ==== EXPORT-SETUP ===========================================================
+out_dir <- "/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/03_Output"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ==== 1) 各モデルの “最終的に使われた変数” を抽出 → CSV =======================
+# できる限り汎用に：selected_terms / selected_vars / selected_parents / coxph係数名 を探索
+extract_vars_used <- function(res){
+  v <- NULL
+  if (is.character(res$selected_terms))   v <- res$selected_terms
+  if (is.null(v) && is.character(res$selected_vars))      v <- res$selected_vars
+  if (is.null(v) && is.character(res$selected_parents))   v <- res$selected_parents
+  if (is.null(v) && inherits(res$fit, "coxph"))           v <- names(stats::coef(res$fit))
+  if (is.null(v) && inherits(res$fit_post, "coxph"))      v <- names(stats::coef(res$fit_post))
+  if (is.null(v) && is.numeric(res$coef) && !is.null(names(res$coef))){
+    v <- names(res$coef)[is.finite(res$coef) & res$coef != 0]
+  }
+  v <- unique(v[!is.na(v) & nzchar(v)])
+  v
+}
+
+stopifnot(exists("model_results"))
+vars_long <- do.call(rbind, lapply(names(model_results), function(m){
+  vv <- extract_vars_used(model_results[[m]])
+  if (length(vv)) data.frame(model = m, variable = vv, stringsAsFactors = FALSE)
+}))
+if (is.null(vars_long) || nrow(vars_long) == 0) {
+  warning("変数一覧を抽出できませんでした（model_results に選択情報が保存されているか確認してください）。")
+} else {
+  write.csv(vars_long, file = file.path(out_dir, "final_vars_by_model.csv"), row.names = FALSE)
+}
+
+## ==== 2) model_summary を CSV へ（無ければ最小限で再構成） ====================
+if (!exists("model_summary")) {
+  # 簡易再構成（c_index / c_se / c_ci / auc_df から）
+  get_auc24 <- function(res){
+    if (is.data.frame(res$auc_df) && nrow(res$auc_df)){
+      j <- which(abs(res$auc_df$time - 24) < 1e-6)
+      if (length(j)) return(as.numeric(res$auc_df$AUC[j[1]]))
+      k <- which.min(abs(res$auc_df$time - 24))
+      if (length(k) && abs(res$auc_df$time[k] - 24) <= 0.6) return(as.numeric(res$auc_df$AUC[k]))
+    }
+    NA_real_
+  }
+  model_summary <- do.call(rbind, lapply(names(model_results), function(m){
+    r <- model_results[[m]]
+    cidx <- as.numeric(r$c_index); se <- as.numeric(r$c_se)
+    if (!is.finite(se) && is.numeric(r$c_ci) && length(r$c_ci) >= 2) {
+      se <- (r$c_ci[2] - r$c_ci[1])/(2*1.96)
+    }
+    lo <- if (all(is.finite(c(cidx, se)))) cidx - 1.96*se else if (!is.null(r$c_ci)) r$c_ci[1] else NA_real_
+    hi <- if (all(is.finite(c(cidx, se)))) cidx + 1.96*se else if (!is.null(r$c_ci)) r$c_ci[2] else NA_real_
+    data.frame(model = m, c_index = cidx, c_se = se, c_lo = lo, c_hi = hi,
+               auc24 = get_auc24(r), stringsAsFactors = FALSE)
+  }))
+}
+write.csv(model_summary, file = file.path(out_dir, "model_summary.csv"), row.names = FALSE)
+
+## ==== 3) ROC カーブ（重ね書き）を保存（PNG/PDF） =============================
+suppressPackageStartupMessages(library(timeROC))
+stopifnot(exists("tst"))
+
+# 使う時間・イベント（あなたのルール）
+T_used <- if ("rfs_months" %in% names(tst)) as.numeric(tst$rfs_months) else as.numeric(tst$time2y)
+Delta  <- if ("rfs_event"  %in% names(tst)) as.integer(tst$rfs_event==1) else as.integer(tst$event2y)
+
+# risk が無いモデルは fit/fit_post から補完
+for (m in names(model_results)){
+  res <- model_results[[m]]
+  if (is.null(res$risk) || length(res$risk) != nrow(tst)){
+    if (inherits(res$fit, "coxph")) {
+      model_results[[m]]$risk <- as.numeric(predict(res$fit, newdata = tst, type = "lp"))
+    } else if (inherits(res$fit_post, "coxph")) {
+      model_results[[m]]$risk <- as.numeric(predict(res$fit_post, newdata = tst, type = "lp"))
+    }
+  }
+}
+
+# timeROC を 24m優先で作成
+times_try <- c(24, 18, 12, 6); tol_near <- 0.6
+roc_list <- list()
+for (m in names(model_results)){
+  r <- model_results[[m]]$risk
+  if (!is.numeric(r) || length(r) != length(T_used)) next
+  ok <- vapply(times_try, function(t){
+    sum(T_used <= t & Delta == 1, na.rm = TRUE) > 0 &&
+      sum(T_used >  t,             na.rm = TRUE) > 0
+  }, logical(1))
+  t_ok <- sort(times_try[ok]); if (!length(t_ok)) next
+  roc <- timeROC(T = T_used, delta = Delta, marker = r, cause = 1, times = t_ok, iid = TRUE)
+  if (24 %in% roc$times) {
+    t_show <- 24; auc_show <- roc$AUC[roc$times == 24]
+  } else {
+    j <- which.min(abs(roc$times - 24))
+    if (abs(roc$times[j] - 24) <= tol_near) { t_show <- roc$times[j]; auc_show <- roc$AUC[j] }
+    else { j <- which.max(roc$times); t_show <- roc$times[j]; auc_show <- roc$AUC[j] }
+  }
+  roc_list[[m]] <- list(roc = roc, t_show = t_show, auc = as.numeric(auc_show))
+  if (is.null(model_results[[m]]$auc_df)) {
+    model_results[[m]]$auc_df <- data.frame(time = roc$times, AUC = roc$AUC)
+  }
+}
+
+plot_roc_overlay <- function(roc_list, main_title = "Time-dependent ROC curves (Test)"){
+  if (!length(roc_list)) { plot.new(); title("No models to plot"); return(invisible()) }
+  models <- names(roc_list); cols <- grDevices::rainbow(length(models)); lwd <- 2
+  # 1本目
+  m1 <- models[1]
+  plot(roc_list[[m1]]$roc, time = roc_list[[m1]]$t_show,
+       col = cols[1], lwd = lwd,
+       xlab = "False Positive Rate (1 - Specificity)",
+       ylab = "True Positive Rate (Sensitivity)", title = FALSE)
+  title(main = main_title)
+  abline(0,1,lty=3,col="gray60")
+  # 以降重ね
+  for (i in 2:length(models)){
+    plot(roc_list[[models[i]]]$roc, time = roc_list[[models[i]]]$t_show,
+         add = TRUE, col = cols[i], lwd = lwd)
+  }
+  lgd <- vapply(models, function(m){
+    sprintf("%s  (AUC@%s m = %.3f)", m,
+            format(roc_list[[m]]$t_show, trim=TRUE), roc_list[[m]]$auc)
+  }, "")
+  legend("bottomright", legend = lgd, col = cols, lwd = lwd, cex = 0.8, bg = "white")
+}
+
+# PNG
+png(file.path(out_dir, "roc_curves_test_overlay.png"), width = 1800, height = 1400, res = 200)
+plot_roc_overlay(roc_list)
+dev.off()
+# PDF
+pdf(file.path(out_dir, "roc_curves_test_overlay.pdf"), width = 8, height = 6)
+plot_roc_overlay(roc_list)
+dev.off()
+
+message("✅ 書き出し完了：\n",
+        "- ", file.path(out_dir, "final_vars_by_model.csv"), "\n",
+        "- ", file.path(out_dir, "model_summary.csv"), "\n",
+        "- ", file.path(out_dir, "roc_curves_test_overlay.png"), " / .pdf")
+
+```
+

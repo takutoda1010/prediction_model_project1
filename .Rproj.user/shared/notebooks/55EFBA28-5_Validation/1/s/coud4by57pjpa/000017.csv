@@ -1,0 +1,5 @@
+"0",""
+"0","legend(""topleft"", bty = ""n"","
+"0","       legend = c(""Decile AJ"", ""LOESS"", ""45°""),"
+"0","       pch = c(19, NA, NA), lty = c(NA, 1, 2), lwd = c(NA, 2, 1),"
+"0","       col = c(""black"", ""black"", ""gray60""))"

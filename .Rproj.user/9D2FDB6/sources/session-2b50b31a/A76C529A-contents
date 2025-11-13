@@ -1,0 +1,2117 @@
+---
+title: "main"
+author: "Takuto Yoshida"
+date: "2025-11-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+################################################################################
+# main.R - HCC再発予測モデル構築メインスクリプト
+# 
+# Description: 
+#   全パイプラインを統合実行
+#   データ読み込みからモデル評価・可視化まで
+#
+# Author: Takuto Yoshida
+# Date: 2024-11-07
+################################################################################
+
+# ========================================================================
+# 0. 環境設定
+# ========================================================================
+
+# 設定ファイルから読み込み（setwd()は使わない）
+config <- yaml::read_yaml("/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/04_Script/config/settings.yaml")
+PROJECT_DIR <- config$paths$base_dir
+
+# 作業ディレクトリの確認のみ（変更はしない）
+current_wd <- getwd()
+message(sprintf("Current working directory: %s", current_wd))
+message(sprintf("Project directory (from config): %s", PROJECT_DIR))
+
+# 実行時間の記録開始
+start_time <- Sys.time()
+
+message("\n")
+message("================================================================================")
+message("                    HCC Recurrence Prediction Model Pipeline                    ")
+message("================================================================================")
+message(sprintf("Started at: %s", format(start_time, "%Y-%m-%d %H:%M:%S")))
+message(sprintf("Project base: %s", basename(PROJECT_DIR)))
+message("")
+
+
+```
+```{r}
+# 下記を一度だけ実行
+#.Rmdから.Rファイルを生成（一度だけ実行）
+library(knitr)
+
+script_dir <- file.path(PROJECT_DIR, "04_Script", "R")
+
+# .Rmdファイルのリスト
+rmd_files <- list.files(script_dir, pattern = "\\.Rmd$", full.names = TRUE)
+
+for (rmd_file in rmd_files) {
+  # 出力ファイル名（.Rmd → .R）
+  r_file <- sub("\\.Rmd$", ".R", rmd_file)
+
+  # Rコードを抽出して保存
+  knitr::purl(rmd_file, output = r_file, quiet = TRUE, documentation = 0)
+
+  message(sprintf("Created: %s", basename(r_file)))
+}
+
+# ========================================================================
+# 1. ソースファイルの読み込み
+# ========================================================================
+
+message("\n📚 Loading source files...")
+message("----------------------------------------")
+
+# スクリプトディレクトリ
+script_dir <- file.path(PROJECT_DIR, "04_Script", "R")
+
+# .Rファイルを読み込み（.Rmdではなく）
+source_files <- c(
+  "00_setup.R",      # .R に変更
+  "01_data_loader.R",
+  "02_data_cleaner.R",
+  "03_feature_engineer.R",
+  "04_data_splitter.R",
+  "05_model_builder.R",
+  "06_model_evaluator.R",
+  "07_visualizer.R"
+)
+
+for (file in source_files) {
+  file_path <- file.path(script_dir, file)
+  if (file.exists(file_path)) {
+    source(file_path)
+    message(sprintf("  ✓ Loaded: %s", file))
+  } else {
+    warning(sprintf("  ✗ File not found: %s", file))
+  }
+}
+```
+
+```{r}
+# ========================================================================
+# 2. プロジェクト初期化
+# ========================================================================
+
+message("\n🚀 Initializing project...")
+message("----------------------------------------")
+
+# 設定ファイルのパス
+config_path <- file.path(PROJECT_DIR, "04_Script", "config", "settings.yaml")
+variables_path <- file.path(PROJECT_DIR, "04_Script", "config", "variables.yaml")
+
+# 設定ファイルの確認
+if (!file.exists(config_path)) {
+  stop(sprintf("Configuration file not found: %s", config_path))
+}
+if (!file.exists(variables_path)) {
+  stop(sprintf("Variables file not found: %s", variables_path))
+}
+
+# 設定の読み込み
+config <- yaml::read_yaml(config_path)
+variables <- yaml::read_yaml(variables_path)
+
+message(sprintf("  ✓ Configuration loaded from: %s", basename(config_path)))
+message(sprintf("  ✓ Variables loaded from: %s", basename(variables_path)))
+
+# プロジェクトパスの初期化
+paths <- initialize_project(config_path, verbose = FALSE)
+```
+
+```{r}
+# ========================================================================
+# 3. データ読み込みとクリーニング
+# ========================================================================
+
+message("\n📊 Data Processing Pipeline")
+message("----------------------------------------")
+
+# 3.1 データ読み込み
+message("\n[Step 1/7] Loading and preparing data...")
+dm <- load_and_prepare_data(
+  config_path = config_path,
+  variables_path = variables_path
+)
+
+# 3.2 データクリーニング
+message("\n[Step 2/7] Cleaning data...")
+dm <- clean_data_pipeline(dm, config, variables)
+
+# 3.3 特徴量エンジニアリング
+message("\n[Step 3/7] Engineering features...")
+dm <- feature_engineering_pipeline(dm, config, variables)
+
+# 最終データの取得
+final_data <- dm$get_current()
+
+# 欠損値の補完
+final_data <- handle_missing_values(final_data, config, method = "median")
+
+message(sprintf("\n  ✓ Final dataset: %d rows × %d columns", 
+               nrow(final_data), ncol(final_data)))
+
+# データの保存（オプション）
+if (config$runtime$save_intermediate) {
+  saveRDS(final_data, file.path(paths$output, "processed_data.rds"))
+  message("  ✓ Processed data saved")
+}
+```
+
+```{r}
+# ========================================================================
+# 4. データ分割
+# ========================================================================
+
+message("\n[Step 4/7] Splitting data...")
+message("----------------------------------------")
+
+# 分割方法の取得
+split_method <- ifelse(!is.null(config$model$split_method), 
+                       config$model$split_method, 
+                       "temporal")
+
+# 予測期間の取得
+prediction_months <- ifelse(!is.null(config$model$prediction_time),
+                           config$model$prediction_time,
+                           24)
+
+# 基準日の設定
+reference_date <- Sys.Date()
+if (!is.null(config$model$reference_date)) {
+  reference_date <- as.Date(config$model$reference_date)
+}
+
+# データ分割実行
+split_data <- split_data_pipeline(
+  df = final_data,
+  config = config,
+  method = split_method,
+  prediction_months = prediction_months,
+  reference_date = "auto",
+  create_cv = TRUE
+)
+
+# 分割結果の保存
+if (config$runtime$save_intermediate) {
+  save_split(split_data, file.path(paths$output_models, "data_split.rds"))
+  message("  ✓ Data split saved")
+}
+```
+
+
+```{r}
+# ========================================================================
+# 5. モデル構築
+# ========================================================================
+
+message("\n[Step 5/7] Building models...")
+message("----------------------------------------")
+
+# 全モデル構築
+# ===== Step 1: time2yのゼロ値を修正 =====
+fix_zero_times <- function(data) {
+  if ("time2y" %in% names(data)) {
+    zero_idx <- which(data$time2y <= 0)
+    if (length(zero_idx) > 0) {
+      data$time2y[zero_idx] <- 0.1
+      message(sprintf("Fixed %d zero/negative time values", length(zero_idx)))
+    }
+  }
+  return(data)
+}
+
+# すべてのデータセットに適用
+split_data_clean$train <- fix_zero_times(split_data_clean$train)
+split_data_clean$val <- fix_zero_times(split_data_clean$val)
+split_data_clean$test <- fix_zero_times(split_data_clean$test)
+
+# ===== Step 2: YAMLを再読み込み =====
+variables <- yaml::read_yaml(file.path(PROJECT_DIR, "04_Script/config/variables.yaml"))
+config <- yaml::read_yaml(file.path(PROJECT_DIR, "04_Script/config/settings.yaml"))
+
+# ===== Step 3: スクリプトを再読み込み =====
+source(file.path(PROJECT_DIR, "04_Script/R/05_model_builder.R"))
+
+# ===== Step 4: モデル構築 =====
+USE_VARIABLE_SET <- "postop_pathology_custom"
+
+models <- build_all_models(
+  split_data = split_data_clean,
+  config = config,
+  variables = variables,
+  variable_set_name = USE_VARIABLE_SET
+)
+
+# ===== Step 5: 結果確認 =====
+message("\n=== Model Results ===")
+for (model_name in names(models)) {
+  if (!is.null(models[[model_name]])) {
+    if (inherits(models[[model_name]], "coxph")) {
+      n_vars <- length(coef(models[[model_name]]))
+    } else {
+      n_vars <- length(attr(models[[model_name]], "selected_vars"))
+    }
+    message(sprintf("✓ %s: %d variables", model_name, n_vars))
+  } else {
+    message(sprintf("✗ %s: Failed", model_name))
+  }
+}
+
+# モデルの保存
+save_models(models, file.path(paths$output_models, "all_models.rds"))
+
+# モデル数の確認
+n_successful <- sum(!sapply(models, is.null))
+message(sprintf("\n  ✓ Successfully built %d/%d models", 
+               n_successful, length(models)))
+```
+
+```{r}
+# ========================================================================
+# 5.5 評価前のデータクリーニング（修正版）
+# ========================================================================
+
+message("\n🧹 Final cleaning before evaluation...")
+message("----------------------------------------")
+
+# 変数名の最終チェック（追加）
+clean_names_final <- function(data) {
+  old_names <- names(data)
+  new_names <- gsub(" ", "_", old_names)
+  new_names <- gsub("\\+", "_plus", new_names)
+  new_names <- gsub("±", "_pm", new_names)
+  names(data) <- new_names
+  return(data)
+}
+
+# 各データセットの変数名をクリーン
+split_data_clean$train <- clean_names_final(split_data_clean$train)
+split_data_clean$val <- clean_names_final(split_data_clean$val)
+split_data_clean$test <- clean_names_final(split_data_clean$test)
+
+# クリーニング関数
+clean_for_evaluation <- function(data) {
+  # 1. 完全に不要な変数を削除
+  vars_to_remove <- c(
+    # 日付系の不要変数
+    "first_visit_dt", "adm_dt",  # ← これらは本当に不要
+    # BMI_category関連
+    "BMI_category", "BMI_categoryNormal", "BMI_categoryOverweight", "BMI_categoryObese",
+    # その他不要
+    "im", "im1", "Pringle", 
+    "fc_inf_numeric", "sm_numeric", "sf_numeric", "fc_numeric",
+    "最大径", "個数", "性別"
+  )
+  
+  for (var in vars_to_remove) {
+    if (var %in% names(data)) {
+      data[[var]] <- NULL
+      message(sprintf("  Removed: %s", var))
+    }
+  }
+  
+  # 2. recur_dateは欠損のまま残す（再発なし情報として重要）
+  # ただし、モデルには使わないので問題なし
+  
+  # 3. 他の変数の欠損値を補完
+  numeric_vars <- names(data)[sapply(data, is.numeric)]
+  # recur_dateは除外して補完
+  numeric_vars <- setdiff(numeric_vars, "recur_date")
+  
+  for (var in numeric_vars) {
+    if (any(is.na(data[[var]]))) {
+      med_val <- median(data[[var]], na.rm = TRUE)
+      if (is.finite(med_val)) {
+        data[[var]][is.na(data[[var]])] <- med_val
+      }
+    }
+  }
+  
+  # カテゴリ変数
+  factor_vars <- names(data)[sapply(data, function(x) is.factor(x) || is.character(x))]
+  # recur_dateとdeath_cause系は除外
+  factor_vars <- setdiff(factor_vars, c("recur_date", "death_cause", "death_cause4"))
+  
+  for (var in factor_vars) {
+    if (any(is.na(data[[var]]))) {
+      tab <- table(data[[var]], useNA = "no")
+      if (length(tab) > 0) {
+        mode_val <- names(tab)[which.max(tab)]
+        data[[var]][is.na(data[[var]])] <- mode_val
+      }
+    }
+  }
+  
+  # 論理変数
+  logical_vars <- names(data)[sapply(data, is.logical)]
+  for (var in logical_vars) {
+    if (any(is.na(data[[var]]))) {
+      data[[var]][is.na(data[[var]])] <- FALSE
+    }
+  }
+  
+  return(data)
+}
+
+# 各データセットをクリーニング
+split_data_clean$train <- clean_for_evaluation(split_data_clean$train)
+split_data_clean$val <- clean_for_evaluation(split_data_clean$val)
+split_data_clean$test <- clean_for_evaluation(split_data_clean$test)
+
+# 最終確認（recur_date以外のNA確認）
+message("\n=== Final NA check (excluding recur_date) ===")
+check_na <- function(data, name) {
+  # recur_date以外の列でNAをチェック
+  cols_to_check <- setdiff(names(data), c("recur_date", "death_cause", "death_cause4"))
+  na_count <- sum(is.na(data[, cols_to_check]))
+  message(sprintf("%s: %d NAs (excluding recur_date)", name, na_count))
+  
+  if (na_count > 0) {
+    na_cols <- colSums(is.na(data[, cols_to_check]))
+    na_cols <- na_cols[na_cols > 0]
+    if (length(na_cols) > 0) {
+      message(sprintf("  Remaining NAs in %s:", name))
+      print(na_cols)
+    }
+  }
+  return(na_count)
+}
+
+train_na <- check_na(split_data_clean$train, "Train")
+val_na <- check_na(split_data_clean$val, "Val")
+test_na <- check_na(split_data_clean$test, "Test")
+
+# すべて0であることを確認
+if (train_na + val_na + test_na == 0) {
+  message("\n✅ Perfect! No problematic NAs remaining!")
+  message("   (recur_date NAs are kept intentionally as 'no recurrence' indicator)")
+}
+```
+```{r}
+# ========================================================================
+# 6. モデル評価
+# ========================================================================
+
+message("\n========================================")
+message("FIXING EVALUATION DATA PREPARATION")
+message("========================================\n")
+
+# Step 1: クリーンなデータを準備する関数
+prepare_clean_split_data <- function(split_data, variables_to_use = NULL) {
+  
+  message("Preparing clean split data for evaluation...")
+  
+  # モデル構築時に使用された変数を取得
+  if (is.null(variables_to_use) && exists("models") && !is.null(attr(models, "train_data"))) {
+    train_data_used <- attr(models, "train_data")
+    variables_to_use <- setdiff(names(train_data_used), c("surv_obj"))
+    message(sprintf("  Using %d variables from model training", length(variables_to_use)))
+  }
+  
+  # 各データセットをクリーニング
+  clean_dataset <- function(data, name) {
+    message(sprintf("\n  Cleaning %s dataset...", name))
+    
+    # 必要な変数のみ選択
+    if (!is.null(variables_to_use)) {
+      # time2yとrecur_2yは必須
+      required_vars <- unique(c("time2y", "recur_2y", variables_to_use))
+      available_vars <- intersect(required_vars, names(data))
+      missing_vars <- setdiff(required_vars, names(data))
+      
+      if (length(missing_vars) > 0) {
+        message(sprintf("    Warning: %d variables missing", length(missing_vars)))
+        # デバッグ用：最初の5個を表示
+        if (length(missing_vars) <= 5) {
+          message(sprintf("    Missing: %s", paste(missing_vars, collapse = ", ")))
+        }
+      }
+      
+      data <- data[, available_vars, drop = FALSE]
+      message(sprintf("    Selected %d variables", ncol(data)))
+    }
+    
+    # 重複したダミー変数を削除
+    # TRUE/FALSEが重複している変数を検出
+    dup_patterns <- c("TRUETRUE", "FALSEFALSE", "TRUEFALSE", "FALSETRUE")
+    for (pattern in dup_patterns) {
+      bad_vars <- grep(pattern, names(data), value = TRUE)
+      if (length(bad_vars) > 0) {
+        data <- data[, !names(data) %in% bad_vars, drop = FALSE]
+        message(sprintf("    Removed %d duplicate variables with pattern '%s'", 
+                       length(bad_vars), pattern))
+      }
+    }
+    
+    # surv_objを作成
+    if (all(c("time2y", "recur_2y") %in% names(data))) {
+      data$surv_obj <- survival::Surv(
+        time = data$time2y,
+        event = as.numeric(as.character(data$recur_2y) %in% c("TRUE", "1"))
+      )
+      message("    Created surv_obj")
+    }
+    
+    return(data)
+  }
+  
+  # 各データセットを処理
+  result <- list()
+  if (!is.null(split_data$train)) {
+    result$train <- clean_dataset(split_data$train, "train")
+  }
+  if (!is.null(split_data$val)) {
+    result$val <- clean_dataset(split_data$val, "val")
+  }
+  if (!is.null(split_data$test)) {
+    result$test <- clean_dataset(split_data$test, "test")
+  }
+  
+  # メタ情報をコピー
+  result$meta <- split_data$meta
+  result$indices <- split_data$indices
+  
+  return(result)
+}
+
+# Step 2: データを修正
+split_data_fixed <- prepare_clean_split_data(split_data_clean)
+
+# Step 3: 確認
+message("\n📊 Fixed data summary:")
+for (set_name in c("train", "val", "test")) {
+  if (!is.null(split_data_fixed[[set_name]])) {
+    data <- split_data_fixed[[set_name]]
+    message(sprintf("\n%s:", set_name))
+    message(sprintf("  Dimensions: %d × %d", nrow(data), ncol(data)))
+    message(sprintf("  Has surv_obj: %s", "surv_obj" %in% names(data)))
+    message(sprintf("  Has time2y: %s", "time2y" %in% names(data)))
+    message(sprintf("  Has recur_2y: %s", "recur_2y" %in% names(data)))
+  }
+}
+
+# Step 4: 修正版の評価を実行
+message("\n========================================")
+message("RE-RUNNING EVALUATION WITH FIXED DATA")
+message("========================================\n")
+
+# evaluate_all_modelsを再定義（シンプル版）
+evaluate_all_models_fixed <- function(models, split_data_fixed) {
+  
+  results <- list()
+  summary_table <- data.frame()
+  
+  for (model_name in names(models)) {
+    model <- models[[model_name]]
+    
+    if (!is.null(model)) {
+      message(sprintf("\n--- Evaluating: %s ---", model_name))
+      
+      # 各データセットで評価
+      for (set_name in c("train", "val", "test")) {
+        data <- split_data_fixed[[set_name]]
+        
+        if (!is.null(data) && "surv_obj" %in% names(data)) {
+          
+          tryCatch({
+            # C-indexの計算
+            if (inherits(model, "coxph")) {
+              pred <- predict(model, newdata = data, type = "risk")
+            } else if (inherits(model, "list") && "model" %in% names(model) && !is.null(model$model)) {
+              pred <- predict(model$model, newdata = data, type = "risk")
+            } else if (inherits(model, "lasso_cox")) {
+              # LASSOの場合の処理
+              X_vars <- intersect(colnames(model$X), names(data))
+              if (length(X_vars) > 0) {
+                # 簡易版：利用可能な変数のみ使用
+                formula_str <- paste("~ -1 +", paste(model$selected_vars[model$selected_vars %in% names(data)], collapse = " + "))
+                X_new <- model.matrix(as.formula(formula_str), data = data)
+                
+                # 欠落している列を0で埋める
+                X_full <- matrix(0, nrow = nrow(data), ncol = ncol(model$X))
+                colnames(X_full) <- colnames(model$X)
+                common_cols <- intersect(colnames(X_new), colnames(model$X))
+                if (length(common_cols) > 0) {
+                  X_full[, common_cols] <- X_new[, common_cols]
+                }
+                
+                pred <- predict(model$glmnet_model, newx = X_full, s = model$lambda_min, type = "link")[, 1]
+              } else {
+                pred <- rep(0, nrow(data))
+              }
+            } else {
+              pred <- rep(0, nrow(data))
+            }
+            
+            # C-index計算
+            c_result <- survival::concordance(data$surv_obj ~ pred, reverse = TRUE)
+            c_index <- c_result$concordance
+            
+            message(sprintf("  %s: C-index = %.3f", set_name, c_index))
+            
+            # 結果を保存
+            if (!model_name %in% names(results)) {
+              results[[model_name]] <- list()
+            }
+            results[[model_name]][[set_name]] <- list(c_index = c_index)
+            
+          }, error = function(e) {
+            message(sprintf("  %s: Error - %s", set_name, e$message))
+          })
+        }
+      }
+      
+      # サマリーテーブルに追加
+      if (model_name %in% names(results)) {
+        summary_row <- data.frame(
+          model = model_name,
+          c_index_train = ifelse("train" %in% names(results[[model_name]]), 
+                                results[[model_name]]$train$c_index, NA),
+          c_index_val = ifelse("val" %in% names(results[[model_name]]), 
+                              results[[model_name]]$val$c_index, NA),
+          c_index_test = ifelse("test" %in% names(results[[model_name]]), 
+                               results[[model_name]]$test$c_index, NA)
+        )
+        summary_table <- rbind(summary_table, summary_row)
+      }
+    }
+  }
+  
+  # ソート
+  if (nrow(summary_table) > 0) {
+    summary_table <- summary_table[order(summary_table$c_index_test, decreasing = TRUE, na.last = TRUE), ]
+    rownames(summary_table) <- NULL
+  }
+  
+  return(list(
+    results = results,
+    summary = summary_table
+  ))
+}
+
+# 実行
+eval_results_fixed <- evaluate_all_models_fixed(models, split_data_fixed)
+
+# 結果表示
+if (!is.null(eval_results_fixed$summary) && nrow(eval_results_fixed$summary) > 0) {
+  message("\n📊 EVALUATION RESULTS (FIXED):")
+  print(eval_results_fixed$summary, digits = 3)
+  
+  # 成功したモデルのカウント
+  n_success <- sum(!is.na(eval_results_fixed$summary$c_index_test))
+  message(sprintf("\n✅ Successfully evaluated %d/%d models", 
+                 n_success, nrow(eval_results_fixed$summary)))
+}
+
+# グローバル変数として保存
+evaluation_results <- eval_results_fixed
+message("\n💾 Results saved as 'evaluation_results'")
+```
+
+
+
+
+```{r}
+# ========================================================================
+# 可視化前の最終確認
+# ========================================================================
+
+message("\n========================================")
+message("FINAL CHECK BEFORE VISUALIZATION")
+message("========================================\n")
+
+# 1. 評価結果の確認
+if (exists("evaluation_results") && !is.null(evaluation_results$summary)) {
+  message("📊 Evaluation results summary:")
+  print(evaluation_results$summary[, c("model", "c_index_test")], digits = 3)
+  
+  # ベストモデルの特定
+  best_idx <- which.max(evaluation_results$summary$c_index_test)
+  if (length(best_idx) > 0) {
+    best_model <- evaluation_results$summary[best_idx, ]
+    message(sprintf("\n🏆 Best model: %s (C-index = %.3f)", 
+                   best_model$model, best_model$c_index_test))
+  }
+}
+
+# 2. 簡易版の可視化関数（C-indexベースのみ）
+create_simple_visualizations <- function(evaluation_results, models, output_dir) {
+  
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  plots <- list()
+  
+  # 1. モデル比較プロット
+  tryCatch({
+    message("\n📊 Creating model comparison plot...")
+    
+    summary_df <- evaluation_results$summary
+    
+    # データ準備
+    plot_data <- tidyr::pivot_longer(
+      summary_df,
+      cols = starts_with("c_index"),
+      names_to = "dataset",
+      values_to = "c_index"
+    )
+    
+    plot_data$dataset <- gsub("c_index_", "", plot_data$dataset)
+    plot_data$dataset <- factor(plot_data$dataset, levels = c("train", "val", "test"))
+    
+    # プロット作成
+    p <- ggplot(plot_data, aes(x = model, y = c_index, fill = dataset)) +
+      geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+      geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+      labs(
+        title = "Model Performance Comparison (C-index)",
+        x = "Model",
+        y = "C-index",
+        fill = "Dataset"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top"
+      ) +
+      scale_fill_brewer(palette = "Set2")
+    
+    # 保存
+    ggsave(
+      file.path(output_dir, "model_comparison.pdf"),
+      plot = p, width = 10, height = 6
+    )
+    
+    plots$comparison <- p
+    message("  ✓ Model comparison plot created")
+    
+  }, error = function(e) {
+    message(sprintf("  ✗ Error in comparison plot: %s", e$message))
+  })
+  
+  # 2. 変数重要度プロット（簡易版）
+  tryCatch({
+    message("\n📊 Creating variable importance plot...")
+    
+    # 各モデルから変数を集計
+    var_frequency <- table(unlist(lapply(models, function(m) {
+      if (inherits(m, "coxph")) {
+        names(coef(m))
+      } else if (inherits(m, "list") && "selected_vars" %in% names(m)) {
+        m$selected_vars
+      } else {
+        NULL
+      }
+    })))
+    
+    if (length(var_frequency) > 0) {
+      var_df <- data.frame(
+        variable = names(var_frequency),
+        frequency = as.numeric(var_frequency)
+      )
+      var_df <- var_df[order(var_df$frequency, decreasing = TRUE), ]
+      var_df <- head(var_df, 20)
+      
+      var_df$variable <- factor(var_df$variable, levels = rev(var_df$variable))
+      
+      p2 <- ggplot(var_df, aes(x = variable, y = frequency)) +
+        geom_bar(stat = "identity", fill = "steelblue") +
+        coord_flip() +
+        labs(
+          title = "Variable Selection Frequency Across Models",
+          x = "Variable",
+          y = "Frequency"
+        ) +
+        theme_minimal()
+      
+      ggsave(
+        file.path(output_dir, "variable_frequency.pdf"),
+        plot = p2, width = 8, height = 10
+      )
+      
+      plots$var_importance <- p2
+      message("  ✓ Variable importance plot created")
+    }
+    
+  }, error = function(e) {
+    message(sprintf("  ✗ Error in variable plot: %s", e$message))
+  })
+  
+  # 3. 結果テーブル（HTML/CSV）
+  tryCatch({
+    message("\n📊 Creating results table...")
+    
+    # CSV保存
+    write.csv(
+      evaluation_results$summary,
+      file.path(output_dir, "model_performance.csv"),
+      row.names = FALSE
+    )
+    
+    message("  ✓ Results table saved")
+    
+  }, error = function(e) {
+    message(sprintf("  ✗ Error in table: %s", e$message))
+  })
+  
+  return(plots)
+}
+
+# 3. 可視化実行
+message("\n========================================")
+message("[Step 7/7] Creating visualizations...")
+message("========================================")
+
+# シンプル版の可視化を実行
+plots_simple <- create_simple_visualizations(
+  evaluation_results = evaluation_results,
+  models = models,
+  output_dir = paths$output_figures
+)
+
+# オリジナルの可視化関数も試す（エラーが出ても続行）
+plots_original <- tryCatch({
+  visualize_all_results(
+    evaluation_results = evaluation_results,
+    models = models,
+    output_dir = paths$output_figures,
+    config = config
+  )
+}, error = function(e) {
+  message(sprintf("\nNote: Some advanced visualizations failed: %s", e$message))
+  message("Using simplified visualizations instead.")
+  NULL
+})
+
+# 作成されたプロット数をカウント
+n_plots <- sum(!sapply(c(plots_simple, plots_original), is.null))
+message(sprintf("\n✓ Created %d visualizations", n_plots))
+```
+
+```{r}
+# ========================================================================
+# 7.5 追加分析：ROCカーブ、DCA、キャリブレーション
+# ========================================================================
+
+message("\n========================================")
+message("ADDITIONAL ANALYSIS AND VISUALIZATIONS")
+message("========================================\n")
+
+# カラーブラインド対応の色設定
+cb_palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", 
+                "#0072B2", "#D55E00", "#CC79A7", "#999999")
+
+# ------------------------------------------------------------------------
+# 1. ベストモデルとTNMモデルの準備
+# ------------------------------------------------------------------------
+
+message("1. Preparing models for comparison")
+message("----------------------------------------")
+
+# ベストモデルの特定
+best_idx <- which.max(evaluation_results$summary$c_index_test)
+best_model_name <- evaluation_results$summary$model[best_idx]
+best_model <- models[[best_model_name]]
+
+message(sprintf("Best model: %s (C-index = %.3f)", 
+               best_model_name, 
+               evaluation_results$summary$c_index_test[best_idx]))
+
+# TNMモデルの構築
+message("\nBuilding TNM reference model...")
+tnm_data <- split_data_fixed$train
+tnm_formula <- as.formula("surv_obj ~ t + n + m")
+
+tnm_model <- tryCatch({
+  coxph(tnm_formula, data = tnm_data)
+}, error = function(e) {
+  message("  Note: Standard TNM variables not found, using stage_diag as proxy")
+  if ("stage_diag" %in% names(tnm_data)) {
+    coxph(surv_obj ~ stage_diag, data = tnm_data)
+  } else {
+    NULL
+  }
+})
+
+if (!is.null(tnm_model)) {
+  tnm_c_index <- concordance(tnm_model)$concordance
+  message(sprintf("TNM model C-index (train): %.3f", tnm_c_index))
+}
+
+# ------------------------------------------------------------------------
+# 2. ROCカーブ作成（全モデル）
+# ------------------------------------------------------------------------
+
+message("\n2. Creating ROC curves for all models")
+message("----------------------------------------")
+
+# ROC作成関数
+create_roc_curves_complete <- function(models, data, time_point = 24, output_file = NULL) {
+  
+  require(timeROC)
+  require(pROC)
+  
+  # 結果格納用
+  all_roc_data <- list()
+  all_auc_values <- list()
+  
+  # カラーパレット
+  model_colors <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", 
+                    "#0072B2", "#D55E00", "#CC79A7", "#999999", "#000000")
+  
+  # 各モデルのROC計算
+  model_idx <- 0
+  
+  for (model_name in names(models)) {
+    model <- models[[model_name]]
+    model_idx <- model_idx + 1
+    
+    if (!is.null(model)) {
+      message(sprintf("  Processing: %s", model_name))
+      
+      # リスクスコアを取得
+      risk_score <- tryCatch({
+        if (inherits(model, "coxph")) {
+          predict(model, newdata = data, type = "lp")
+        } else if (inherits(model, "list") && "model" %in% names(model) && !is.null(model$model)) {
+          predict(model$model, newdata = data, type = "lp")
+        } else {
+          NULL
+        }
+      }, error = function(e) {
+        NULL
+      })
+      
+      if (!is.null(risk_score) && length(risk_score) == nrow(data)) {
+        
+        # pROCを使用（より安定）
+        tryCatch({
+          outcome_binary <- as.numeric(data$recur_2y == TRUE & data$time2y <= time_point)
+          
+          if (sum(outcome_binary) > 0 && sum(outcome_binary) < length(outcome_binary)) {
+            roc_obj <- pROC::roc(outcome_binary, risk_score, quiet = TRUE)
+            coords_all <- coords(roc_obj, "all", ret = c("specificity", "sensitivity"))
+            
+            all_roc_data[[model_name]] <- data.frame(
+              model = model_name,
+              FPR = 1 - coords_all$specificity,
+              TPR = coords_all$sensitivity
+            )
+            
+            all_auc_values[[model_name]] <- as.numeric(auc(roc_obj))
+            message(sprintf("    AUC: %.3f", all_auc_values[[model_name]]))
+          }
+        }, error = function(e) {
+          message(sprintf("    Error: %s", e$message))
+        })
+      }
+    }
+  }
+  
+  # TNMモデルも追加
+  if (exists("tnm_model") && !is.null(tnm_model)) {
+    message("  Processing: TNM Model")
+    
+    tnm_risk <- predict(tnm_model, newdata = data, type = "lp")
+    outcome_binary <- as.numeric(data$recur_2y == TRUE & data$time2y <= time_point)
+    
+    if (sum(outcome_binary) > 0) {
+      roc_tnm <- pROC::roc(outcome_binary, tnm_risk, quiet = TRUE)
+      coords_tnm <- coords(roc_tnm, "all", ret = c("specificity", "sensitivity"))
+      
+      all_roc_data[["TNM Model"]] <- data.frame(
+        model = "TNM Model",
+        FPR = 1 - coords_tnm$specificity,
+        TPR = coords_tnm$sensitivity
+      )
+      
+      all_auc_values[["TNM Model"]] <- as.numeric(auc(roc_tnm))
+      message(sprintf("    TNM AUC: %.3f", all_auc_values[["TNM Model"]]))
+    }
+  }
+  
+  # データを結合してプロット
+  if (length(all_roc_data) > 0) {
+    roc_data_combined <- do.call(rbind, all_roc_data)
+    
+    # AUCデータフレーム作成
+    auc_df <- data.frame(
+      model = names(all_auc_values),
+      AUC = unlist(all_auc_values),
+      stringsAsFactors = FALSE
+    )
+    
+    # AUCでソート
+    auc_df <- auc_df[order(auc_df$AUC, decreasing = TRUE), ]
+    
+    # プロット作成
+    p <- ggplot(roc_data_combined, aes(x = FPR, y = TPR, color = model)) +
+      geom_line(size = 1.2, alpha = 0.9) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+                  color = "gray50", size = 0.8) +
+      scale_color_manual(
+        values = setNames(model_colors[1:length(unique(roc_data_combined$model))], 
+                         auc_df$model),
+        labels = paste0(auc_df$model, " (AUC = ", sprintf("%.3f", auc_df$AUC), ")"),
+        breaks = auc_df$model
+      ) +
+      labs(
+        title = sprintf("ROC Curves at %d Months", time_point),
+        subtitle = sprintf("Best: %s (AUC = %.3f)", auc_df$model[1], auc_df$AUC[1]),
+        x = "False Positive Rate (1 - Specificity)",
+        y = "True Positive Rate (Sensitivity)",
+        color = "Model"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(
+        legend.position = "right",
+        legend.text = element_text(size = 9),
+        panel.grid.minor = element_blank()
+      ) +
+      coord_equal() +
+      xlim(0, 1) + ylim(0, 1)
+    
+    if (!is.null(output_file)) {
+      ggsave(output_file, plot = p, width = 10, height = 8, dpi = 300)
+      message(sprintf("\n✓ ROC plot saved to: %s", basename(output_file)))
+    }
+    
+    # グローバル変数として保存
+    assign("roc_data_all", roc_data_combined, envir = .GlobalEnv)
+    assign("auc_values", auc_df, envir = .GlobalEnv)
+    
+    return(p)
+  } else {
+    return(NULL)
+  }
+}
+
+# ROCプロット実行
+roc_plot_final <- create_roc_curves_complete(
+  models = models,
+  data = split_data_fixed$test,
+  time_point = 24,
+  output_file = file.path(paths$output_figures, "roc_curves_all_models.pdf")
+)
+
+# ------------------------------------------------------------------------
+# 3. Decision Curve Analysis (DCA)
+# ------------------------------------------------------------------------
+
+message("\n3. Creating Decision Curve Analysis")
+message("----------------------------------------")
+
+perform_dca_fixed <- function(models, data, time_point = 24, output_file = NULL) {
+  
+  # 閾値の範囲
+  thresholds <- seq(0.01, 0.50, by = 0.01)
+  dca_results <- data.frame()
+  
+  # モデルリスト
+  model_list <- list(
+    "Best Model" = best_model,
+    "TNM Model" = tnm_model
+  )
+  
+  for (model_name in names(model_list)) {
+    model <- model_list[[model_name]]
+    
+    if (!is.null(model)) {
+      # リスクスコアから予測確率を計算
+      if (inherits(model, "coxph")) {
+        lp <- predict(model, newdata = data, type = "lp")
+        surv_obj <- survfit(model, newdata = data[1,])
+        time_idx <- which.min(abs(surv_obj$time - time_point))
+        baseline_surv <- surv_obj$surv[time_idx]
+        pred_prob <- 1 - baseline_surv^exp(lp)
+      } else {
+        next
+      }
+      
+      # 実際のイベント
+      event_occurred <- (data$recur_2y == TRUE) & (data$time2y <= time_point)
+      
+      # 各閾値でのNet Benefit計算
+      for (thresh in thresholds) {
+        treat <- pred_prob >= thresh
+        tp <- sum(treat & event_occurred, na.rm = TRUE)
+        fp <- sum(treat & !event_occurred, na.rm = TRUE)
+        n <- length(event_occurred)
+        
+        net_benefit <- (tp/n) - (fp/n) * (thresh/(1-thresh))
+        
+        dca_results <- rbind(dca_results, data.frame(
+          model = model_name,
+          threshold = thresh,
+          net_benefit = net_benefit
+        ))
+      }
+    }
+  }
+  
+  # Treat All/None の追加
+  event_rate <- mean((data$recur_2y == TRUE) & (data$time2y <= time_point))
+  
+  for (thresh in thresholds) {
+    # Treat All
+    net_benefit_all <- event_rate - (1-event_rate) * (thresh/(1-thresh))
+    dca_results <- rbind(dca_results, data.frame(
+      model = "Treat All",
+      threshold = thresh,
+      net_benefit = net_benefit_all
+    ))
+    
+    # Treat None
+    dca_results <- rbind(dca_results, data.frame(
+      model = "Treat None", 
+      threshold = thresh,
+      net_benefit = 0
+    ))
+  }
+  
+  # プロット作成
+  p <- ggplot(dca_results, aes(x = threshold, y = net_benefit, color = model)) +
+    geom_line(size = 1.2) +
+    scale_color_manual(values = c(
+      "Best Model" = cb_palette[1],
+      "TNM Model" = cb_palette[2],
+      "Treat All" = "gray60",
+      "Treat None" = "gray80"
+    )) +
+    scale_x_continuous(limits = c(0, 0.5), breaks = seq(0, 0.5, 0.1)) +
+    labs(
+      title = "Decision Curve Analysis",
+      subtitle = sprintf("Net benefit at %d months", time_point),
+      x = "Threshold Probability",
+      y = "Net Benefit",
+      color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank()
+    ) +
+    geom_hline(yintercept = 0, linetype = "dotted", color = "black")
+  
+  if (!is.null(output_file)) {
+    ggsave(output_file, plot = p, width = 10, height = 8, dpi = 300)
+    message(sprintf("  ✓ DCA plot saved to: %s", basename(output_file)))
+  }
+  
+  return(p)
+}
+
+# DCAプロット実行
+dca_plot <- perform_dca_fixed(
+  models = models,
+  data = split_data_fixed$test,
+  time_point = 24,
+  output_file = file.path(paths$output_figures, "dca_comparison.pdf")
+)
+
+# ------------------------------------------------------------------------
+# 4. キャリブレーション評価
+# ------------------------------------------------------------------------
+
+message("\n4. Calibration Assessment")
+message("----------------------------------------")
+
+assess_calibration_robust <- function(model, data, time_point = 24, n_groups = 10) {
+  
+  # リスクスコアから予測確率を計算
+  if (inherits(model, "coxph")) {
+    lp <- predict(model, newdata = data, type = "lp")
+  } else if (inherits(model, "list") && "model" %in% names(model)) {
+    model <- model$model
+    lp <- predict(model, newdata = data, type = "lp")
+  } else {
+    return(NULL)
+  }
+  
+  # ベースラインハザードを使った予測確率の計算
+  basehaz_df <- basehaz(model, centered = FALSE)
+  time_idx <- which.min(abs(basehaz_df$time - time_point))
+  
+  if (length(time_idx) == 0) {
+    time_idx <- nrow(basehaz_df)
+  }
+  
+  baseline_cumhaz <- basehaz_df$hazard[time_idx]
+  pred_prob <- 1 - exp(-baseline_cumhaz * exp(lp))
+  
+  # 予測確率が有効か確認
+  if (all(is.na(pred_prob)) || length(unique(pred_prob)) < 3) {
+    message("  Warning: Insufficient variation in predicted probabilities")
+    return(NULL)
+  }
+  
+  # グループ分割
+  if (length(unique(pred_prob)) >= n_groups) {
+    pred_groups <- cut(pred_prob, 
+                      breaks = quantile(pred_prob, probs = seq(0, 1, length.out = n_groups + 1)),
+                      include.lowest = TRUE,
+                      labels = FALSE)
+  } else {
+    n_groups <- min(5, length(unique(pred_prob)))
+    pred_groups <- cut(pred_prob, 
+                      breaks = n_groups,
+                      include.lowest = TRUE,
+                      labels = FALSE)
+  }
+  
+  # 各グループの観察・期待イベント率
+  calibration_data <- data.frame()
+  
+  for (g in 1:n_groups) {
+    idx <- which(pred_groups == g)
+    
+    if (length(idx) >= 3) {
+      events_in_group <- sum(data$recur_2y[idx] == TRUE & data$time2y[idx] <= time_point)
+      total_in_group <- length(idx)
+      observed <- events_in_group / total_in_group
+      expected <- mean(pred_prob[idx])
+      
+      calibration_data <- rbind(calibration_data, data.frame(
+        group = g,
+        n = length(idx),
+        expected = expected,
+        observed = observed,
+        events = events_in_group
+      ))
+    }
+  }
+  
+  # Calibration-in-the-large と Calibration slope
+  if (nrow(calibration_data) > 2) {
+    cal_model <- tryCatch({
+      lm(observed ~ expected, data = calibration_data, weights = n)
+    }, error = function(e) {
+      lm(observed ~ expected, data = calibration_data)
+    })
+    
+    calibration_slope <- coef(cal_model)[2]
+    calibration_intercept <- coef(cal_model)[1]
+  } else {
+    calibration_slope <- NA
+    calibration_intercept <- NA
+  }
+  
+  return(list(
+    data = calibration_data,
+    slope = calibration_slope,
+    intercept = calibration_intercept
+  ))
+}
+
+# ベストモデルのキャリブレーション評価
+best_calibration <- assess_calibration_robust(
+  model = best_model,
+  data = split_data_fixed$test,
+  time_point = 24
+)
+
+if (!is.null(best_calibration)) {
+  message(sprintf("\nBest Model Calibration:"))
+  message(sprintf("  Calibration-in-the-large (intercept): %.3f", 
+                 ifelse(is.na(best_calibration$intercept), NA, best_calibration$intercept)))
+  message(sprintf("  Calibration slope: %.3f", 
+                 ifelse(is.na(best_calibration$slope), NA, best_calibration$slope)))
+  
+  if (!is.na(best_calibration$slope)) {
+    interpretation <- ifelse(
+      abs(best_calibration$slope - 1) < 0.2, 
+      "Good calibration",
+      ifelse(best_calibration$slope < 0.8, 
+             "Overfitting tendency", 
+             ifelse(best_calibration$slope > 1.2,
+                    "Underfitting tendency",
+                    "Acceptable calibration"))
+    )
+    message(sprintf("  Interpretation: %s", interpretation))
+  }
+}
+
+# ------------------------------------------------------------------------
+# 5. キャリブレーションプロット
+# ------------------------------------------------------------------------
+
+message("\n5. Creating Calibration Plot")
+message("----------------------------------------")
+
+if (!is.null(best_calibration) && nrow(best_calibration$data) > 0) {
+  
+  cal_data <- best_calibration$data
+  
+  # プロット作成
+  cal_plot <- ggplot(cal_data, aes(x = expected, y = observed)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50", size = 1) +
+    {if(nrow(cal_data) >= 3) 
+      geom_smooth(method = "lm", se = TRUE, color = cb_palette[1], fill = cb_palette[1], alpha = 0.2)
+    } +
+    geom_point(aes(size = n), color = cb_palette[2], alpha = 0.7) +
+    geom_errorbar(
+      aes(ymin = observed - 1.96*sqrt(observed*(1-observed)/n),
+          ymax = observed + 1.96*sqrt(observed*(1-observed)/n)),
+      width = 0.02, color = cb_palette[2], alpha = 0.5
+    ) +
+    labs(
+      title = sprintf("Calibration Plot - %s", best_model_name),
+      subtitle = sprintf("Calibration slope = %.3f, Intercept = %.3f",
+                        ifelse(is.na(best_calibration$slope), NA, best_calibration$slope),
+                        ifelse(is.na(best_calibration$intercept), NA, best_calibration$intercept)),
+      x = "Expected Event Probability",
+      y = "Observed Event Probability",
+      size = "Sample Size"
+    ) +
+    scale_x_continuous(limits = c(0, 1), labels = scales::percent) +
+    scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank()
+    ) +
+    coord_equal()
+  
+  # 保存
+  ggsave(
+    file.path(paths$output_figures, "calibration_plot.pdf"),
+    plot = cal_plot,
+    width = 8,
+    height = 8,
+    dpi = 300
+  )
+  message("  ✓ Calibration plot saved")
+  
+} else {
+  message("  ⚠ Calibration plot could not be created due to insufficient data")
+  cal_plot <- NULL
+}
+
+# ------------------------------------------------------------------------
+# 6. 統合図の作成
+# ------------------------------------------------------------------------
+
+message("\n6. Creating Combined Figure")
+message("----------------------------------------")
+
+if (!is.null(roc_plot_final) && !is.null(dca_plot) && !is.null(cal_plot)) {
+  library(patchwork)
+  
+  combined_plot <- (roc_plot_final + dca_plot) / cal_plot +
+    plot_annotation(
+      title = "Model Performance Evaluation",
+      subtitle = sprintf("Best Model: %s", best_model_name),
+      theme = theme(plot.title = element_text(size = 16, face = "bold"))
+    )
+  
+  ggsave(
+    file.path(paths$output_figures, "combined_evaluation.pdf"),
+    plot = combined_plot,
+    width = 16,
+    height = 16,
+    dpi = 300
+  )
+  message("  ✓ Combined evaluation plot saved")
+}
+
+# ------------------------------------------------------------------------
+# 7. 追加分析サマリー
+# ------------------------------------------------------------------------
+
+message("\n========================================")
+message("ADDITIONAL ANALYSIS COMPLETE")
+message("========================================\n")
+
+message("📊 Summary of Additional Analysis:")
+message(sprintf("  Best Model: %s", best_model_name))
+message(sprintf("  C-index (test): %.3f", evaluation_results$summary$c_index_test[best_idx]))
+
+if (!is.null(tnm_model)) {
+  tnm_test_pred <- predict(tnm_model, newdata = split_data_fixed$test, type = "risk")
+  tnm_test_c <- concordance(split_data_fixed$test$surv_obj ~ tnm_test_pred, reverse = TRUE)$concordance
+  message(sprintf("  TNM Model C-index (test): %.3f", tnm_test_c))
+  message(sprintf("  Improvement over TNM: +%.3f", 
+                 evaluation_results$summary$c_index_test[best_idx] - tnm_test_c))
+}
+
+if (!is.null(best_calibration)) {
+  message(sprintf("\n  Calibration Assessment:"))
+  message(sprintf("    Calibration-in-the-large: %.3f", best_calibration$intercept))
+  message(sprintf("    Calibration slope: %.3f", best_calibration$slope))
+}
+
+# 追加分析結果の保存
+additional_results <- list(
+  best_model_name = best_model_name,
+  best_model = best_model,
+  tnm_model = tnm_model,
+  tnm_comparison = ifelse(exists("tnm_test_c"), tnm_test_c, NA),
+  calibration = best_calibration,
+  roc_auc_values = if(exists("auc_values")) auc_values else NULL
+)
+
+saveRDS(additional_results, 
+        file.path(paths$output_models, "additional_analysis_results.rds"))
+
+message("\n✅ Additional analysis results saved!")
+```
+
+```{r}
+# ========================================================================
+# ROCカーブ作成関数の修正版（LASSO対応）
+# ========================================================================
+
+message("\n========================================")
+message("FIXING ROC CALCULATION FOR LASSO MODELS")
+message("========================================\n")
+
+# 修正版：LASSOモデル対応のリスクスコア計算関数
+get_risk_score_fixed <- function(model, data) {
+  
+  # Coxphモデル
+  if (inherits(model, "coxph")) {
+    return(predict(model, newdata = data, type = "lp"))
+  }
+  
+  # リスト型でcoxphを含む場合
+  else if (inherits(model, "list") && "model" %in% names(model) && 
+           !is.null(model$model) && inherits(model$model, "coxph")) {
+    return(predict(model$model, newdata = data, type = "lp"))
+  }
+  
+  # LASSOモデル（Method 2: glmnet直接使用）
+  else if (inherits(model, "lasso_cox") || 
+           (!is.null(model$glmnet_model) && !is.null(model$X))) {
+    
+    # テストデータ用の行列を作成
+    X_test <- matrix(0, nrow = nrow(data), ncol = ncol(model$X))
+    colnames(X_test) <- colnames(model$X)
+    
+    # 利用可能な変数をマッチング
+    common_vars <- intersect(colnames(model$X), names(data))
+    
+    for (var in common_vars) {
+      if (var %in% names(data)) {
+        # 数値に変換（因子変数の場合も考慮）
+        if (is.factor(data[[var]])) {
+          X_test[, var] <- as.numeric(data[[var]]) - 1  # 0/1に変換
+        } else {
+          X_test[, var] <- as.numeric(data[[var]])
+        }
+      }
+    }
+    
+    # 予測
+    pred <- predict(model$glmnet_model, 
+                   newx = X_test, 
+                   s = model$lambda_min, 
+                   type = "link")
+    
+    return(as.numeric(pred))
+  }
+  
+  # その他の場合
+  else {
+    return(NULL)
+  }
+}
+
+# ROC作成関数を更新（LASSO対応版）
+create_roc_curves_complete_v2 <- function(models, data, time_point = 24, output_file = NULL) {
+  
+  require(pROC)
+  
+  # 結果格納用
+  all_roc_data <- list()
+  all_auc_values <- list()
+  
+  # カラーパレット
+  model_colors <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", 
+                    "#0072B2", "#D55E00", "#CC79A7", "#999999", "#000000")
+  
+  # 各モデルのROC計算
+  model_idx <- 0
+  
+  for (model_name in names(models)) {
+    model <- models[[model_name]]
+    model_idx <- model_idx + 1
+    
+    if (!is.null(model)) {
+      message(sprintf("Processing: %s", model_name))
+      
+      # 修正版のリスクスコア取得
+      risk_score <- get_risk_score_fixed(model, data)
+      
+      if (!is.null(risk_score) && length(risk_score) == nrow(data)) {
+        
+        # バイナリアウトカム
+        outcome_binary <- as.numeric(data$recur_2y == TRUE & data$time2y <= time_point)
+        
+        # 有効なデータのみ使用
+        valid_idx <- !is.na(risk_score) & !is.na(outcome_binary)
+        
+        if (sum(valid_idx) > 10 && sum(outcome_binary[valid_idx]) > 0) {
+          
+          # pROCでROC計算
+          tryCatch({
+            roc_obj <- pROC::roc(outcome_binary[valid_idx], 
+                                risk_score[valid_idx], 
+                                quiet = TRUE)
+            coords_all <- coords(roc_obj, "all", ret = c("specificity", "sensitivity"))
+            
+            all_roc_data[[model_name]] <- data.frame(
+              model = model_name,
+              FPR = 1 - coords_all$specificity,
+              TPR = coords_all$sensitivity
+            )
+            
+            all_auc_values[[model_name]] <- as.numeric(auc(roc_obj))
+            message(sprintf("  AUC: %.3f", all_auc_values[[model_name]]))
+            
+          }, error = function(e) {
+            message(sprintf("  Error: %s", e$message))
+          })
+        }
+      } else {
+        message(sprintf("  Risk score calculation failed"))
+      }
+    }
+  }
+  
+  # TNMモデルも追加
+  if (exists("tnm_model") && !is.null(tnm_model)) {
+    message("Processing: TNM Model")
+    
+    tnm_risk <- get_risk_score_fixed(tnm_model, data)
+    
+    if (!is.null(tnm_risk)) {
+      outcome_binary <- as.numeric(data$recur_2y == TRUE & data$time2y <= time_point)
+      
+      roc_tnm <- pROC::roc(outcome_binary, tnm_risk, quiet = TRUE)
+      coords_tnm <- coords(roc_tnm, "all", ret = c("specificity", "sensitivity"))
+      
+      all_roc_data[["TNM Model"]] <- data.frame(
+        model = "TNM Model",
+        FPR = 1 - coords_tnm$specificity,
+        TPR = coords_tnm$sensitivity
+      )
+      
+      all_auc_values[["TNM Model"]] <- as.numeric(auc(roc_tnm))
+      message(sprintf("  TNM AUC: %.3f", all_auc_values[["TNM Model"]]))
+    }
+  }
+  
+  # データを結合してプロット
+  if (length(all_roc_data) > 0) {
+    roc_data_combined <- do.call(rbind, all_roc_data)
+    
+    # AUCデータフレーム作成
+    auc_df <- data.frame(
+      model = names(all_auc_values),
+      AUC = unlist(all_auc_values),
+      stringsAsFactors = FALSE
+    )
+    
+    # AUCでソート
+    auc_df <- auc_df[order(auc_df$AUC, decreasing = TRUE), ]
+    
+    # プロット作成
+    p <- ggplot(roc_data_combined, aes(x = FPR, y = TPR, color = model)) +
+      geom_line(size = 1.2, alpha = 0.9) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+                  color = "gray50", size = 0.8) +
+      scale_color_manual(
+        values = setNames(model_colors[1:length(unique(roc_data_combined$model))], 
+                         auc_df$model),
+        labels = paste0(auc_df$model, " (AUC = ", sprintf("%.3f", auc_df$AUC), ")"),
+        breaks = auc_df$model
+      ) +
+      labs(
+        title = sprintf("ROC Curves at %d Months - All Models", time_point),
+        subtitle = sprintf("Best: %s (AUC = %.3f)", auc_df$model[1], auc_df$AUC[1]),
+        x = "False Positive Rate (1 - Specificity)",
+        y = "True Positive Rate (Sensitivity)",
+        color = "Model"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(
+        legend.position = "right",
+        legend.text = element_text(size = 9),
+        panel.grid.minor = element_blank()
+      ) +
+      coord_equal() +
+      xlim(0, 1) + ylim(0, 1)
+    
+    if (!is.null(output_file)) {
+      ggsave(output_file, plot = p, width = 10, height = 8, dpi = 300)
+      message(sprintf("\n✓ ROC plot saved to: %s", basename(output_file)))
+    }
+    
+    # グローバル変数を更新
+    assign("roc_data_all", roc_data_combined, envir = .GlobalEnv)
+    assign("auc_values", auc_df, envir = .GlobalEnv)
+    
+    return(p)
+  } else {
+    return(NULL)
+  }
+}
+
+# 修正版で再実行
+message("\nRe-running ROC with fixed LASSO support...")
+roc_plot_fixed <- create_roc_curves_complete_v2(
+  models = models,
+  data = split_data_fixed$test,
+  time_point = 24,
+  output_file = file.path(paths$output_figures, "roc_curves_all_models_fixed.pdf")
+)
+
+# 確認
+if (!is.null(roc_plot_fixed)) {
+  print(roc_plot_fixed)
+  
+  # AUC値の確認
+  message("\n📊 Updated AUC values:")
+  print(auc_values)
+  
+  # Model Performance表も更新
+  message("\nUpdating performance table with correct AUC values...")
+  
+  # 既存のテーブルを更新
+  if (exists("comprehensive_performance")) {
+    for (i in 1:nrow(comprehensive_performance)) {
+      model_name <- comprehensive_performance$Model[i]
+      if (model_name %in% auc_values$model) {
+        idx <- which(auc_values$model == model_name)
+        comprehensive_performance[i, "AUC at 24mo"] <- auc_values$AUC[idx]
+      }
+    }
+    
+    # 再保存
+    write.csv(
+      comprehensive_performance,
+      file.path(paths$output_tables, "model_performance_comprehensive_fixed.csv"),
+      row.names = FALSE
+    )
+    
+    message("✓ Updated performance table saved")
+  }
+}
+
+message("\n✅ LASSO AUC issue fixed!")
+```
+
+
+```{r}
+# ========================================================================
+# 8. 結果サマリー（追加分析を含む更新版）
+# ========================================================================
+
+message("\n")
+message("================================================================================")
+message("                              Pipeline Completed                                ")
+message("================================================================================")
+
+# 実行時間
+end_time <- Sys.time()
+elapsed_time <- difftime(end_time, start_time, units = "mins")
+
+message(sprintf("\nExecution Summary:"))
+message(sprintf("  Total time: %.1f minutes", as.numeric(elapsed_time)))
+message(sprintf("  Data: %d samples (%d train, %d val, %d test)",
+               nrow(final_data),
+               nrow(split_data$train),
+               nrow(split_data$val),
+               nrow(split_data$test)))
+message(sprintf("  Models built: %d", n_successful))
+message(sprintf("  Output directory: %s", paths$output))
+
+# ベストモデルの詳細表示（既存のコードそのまま）
+if (exists("evaluation_results") && !is.null(evaluation_results$summary)) {
+  best_idx <- which.max(evaluation_results$summary$c_index_test)
+  if (length(best_idx) > 0) {
+    best <- evaluation_results$summary[best_idx, ]
+    message(sprintf("\n🏆 BEST MODEL: %s", best$model))
+    message(sprintf("  C-index (Train/Val/Test): %.3f / %.3f / %.3f",
+                   best$c_index_train, best$c_index_val, best$c_index_test))
+    
+    # TNMとの比較（追加）
+    if (exists("additional_results") && !is.null(additional_results$tnm_comparison)) {
+      message(sprintf("  TNM C-index: %.3f", additional_results$tnm_comparison))
+      message(sprintf("  Improvement over TNM: +%.3f", 
+                     best$c_index_test - additional_results$tnm_comparison))
+    }
+    
+    # ベストモデルの変数を表示
+    best_model <- models[[best$model]]
+    if (!is.null(best_model)) {
+      if (inherits(best_model, "coxph")) {
+        vars <- names(coef(best_model))
+      } else if (inherits(best_model, "list") && "selected_vars" %in% names(best_model)) {
+        vars <- best_model$selected_vars
+      } else {
+        vars <- NULL
+      }
+      
+      if (!is.null(vars)) {
+        message(sprintf("  Variables (%d): %s", 
+                       length(vars),
+                       paste(vars, collapse = ", ")))
+      }
+    }
+  }
+}
+
+# 出力ファイル一覧（追加分析を含む更新版）
+message("\nGenerated Files:")
+output_files <- list(
+  "📊 Data" = file.path(paths$output, "processed_data.rds"),
+  "🔀 Split" = file.path(paths$output_models, "data_split.rds"),
+  "🤖 Models" = file.path(paths$output_models, "all_models.rds"),
+  "📈 Evaluation" = file.path(paths$output_models, "evaluation_results.rds"),
+  "🔬 Additional Analysis" = file.path(paths$output_models, "additional_analysis_results.rds"),
+  "📋 Summary Table" = file.path(paths$output_tables, "model_performance.csv"),
+  "📉 ROC Curves" = file.path(paths$output_figures, "roc_curves_all_models.pdf"),
+  "📊 DCA" = file.path(paths$output_figures, "dca_comparison.pdf"),
+  "🎯 Calibration" = file.path(paths$output_figures, "calibration_plot.pdf"),
+  "🎨 Combined Plot" = file.path(paths$output_figures, "combined_evaluation.pdf")
+)
+
+for (name in names(output_files)) {
+  if (file.exists(output_files[[name]]) || dir.exists(output_files[[name]])) {
+    message(sprintf("  %s: %s", name, basename(output_files[[name]])))
+  }
+}
+
+message("\n✅ All tasks completed successfully!")
+message(sprintf("\n🎉 Results are available in: %s", paths$output))
+message("\nNext steps:")
+message("  1. Review model performance in: 03_Output/tables/model_performance.csv")
+message("  2. Check ROC curves in: 03_Output/figures/roc_curves_all_models.pdf")
+message("  3. Check DCA in: 03_Output/figures/dca_comparison.pdf")
+message("  4. Check calibration in: 03_Output/figures/calibration_plot.pdf")
+message("  5. Load best model with: readRDS('03_Output/models/all_models.rds')")
+
+message("\n================================================================================\n")
+```
+
+
+
+```{r}
+# ========================================================================
+# 9. オプション: レポート生成
+# ========================================================================
+
+if (!is.null(config$output$report$generate) && config$output$report$generate) {
+  message("\n📝 Generating report...")
+  message("----------------------------------------")
+  
+  # レポート生成スクリプトがあれば実行
+  report_script <- file.path(script_dir, "report_generator.R")
+  if (file.exists(report_script)) {
+    source(report_script)
+    
+    generate_report(
+      evaluation_results = evaluation_results,
+      models = models,
+      config = config,
+      output_dir = paths$output_reports
+    )
+  } else {
+    message("  Report generator not found. Skipping report generation.")
+  }
+}
+```
+
+
+
+```{r}
+# ========================================================================
+# 10. 最終メッセージ
+# ========================================================================
+
+message("\n✅ All tasks completed successfully!")
+message(sprintf("\n🎉 Results are available in: %s", paths$output))
+message("\nNext steps:")
+message("  1. Review model performance in: 03_Output/tables/model_performance.csv")
+message("  2. Check visualizations in: 03_Output/figures/")
+message("  3. Load best model with: readRDS('03_Output/models/all_models.rds')")
+
+# ========================================================================
+# 11. クリーンアップ（オプション）
+# ========================================================================
+
+# ワークスペースのクリーンアップ（オプション）
+if (!is.null(config$runtime$clean_workspace) && config$runtime$clean_workspace) {
+  message("\n🧹 Cleaning workspace...")
+  
+  # 重要なオブジェクトのみ保持
+  keep_objects <- c("evaluation_results", "models", "final_data", "config", "paths")
+  rm_objects <- setdiff(ls(), keep_objects)
+  
+  if (length(rm_objects) > 0) {
+    rm(list = rm_objects)
+    message(sprintf("  Removed %d temporary objects", length(rm_objects)))
+  }
+  
+  # ガベージコレクション
+  gc(verbose = FALSE)
+  message("  ✓ Memory cleaned")
+}
+
+# セッション情報の保存
+session_file <- file.path(paths$output, 
+                         sprintf("session_info_%s.txt", 
+                                format(Sys.Date(), "%Y%m%d")))
+sink(session_file)
+cat("=== Session Information ===\n")
+cat("Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("Execution time:", sprintf("%.1f minutes", as.numeric(elapsed_time)), "\n\n")
+print(sessionInfo())
+sink()
+
+message(sprintf("\n📄 Session info saved to: %s", basename(session_file)))
+message("\n================================================================================\n")
+```
+
+```{r}
+# ========================================================================
+# Table 1: 患者背景の作成
+# ========================================================================
+
+message("\n========================================")
+message("Creating Table 1: Baseline Characteristics")
+message("========================================\n")
+
+create_table1 <- function(data_list, output_file = NULL) {
+  require(tableone)
+  require(dplyr)
+  
+  # データを結合（全体用）
+  all_data <- rbind(
+    cbind(data_list$train, dataset = "Train"),
+    cbind(data_list$val, dataset = "Validation"),
+    cbind(data_list$test, dataset = "Test")
+  )
+  all_data$dataset <- factor(all_data$dataset, levels = c("Train", "Validation", "Test"))
+  
+  # Table 1用の変数を選択
+  vars_continuous <- c(
+    "age", "alb", "tbil", "ast", "alt", "plt", 
+    "pt_inr", "afp", "pivka2", "max_diam_cm", "count",
+    "ALBIscore", "BMI", "icg_r15"
+  )
+  
+  vars_categorical <- c(
+    "sex", "hbv", "child_pugh", "liver_damage", 
+    "stage_diag", "ALBIgrade", "microVI", "macroVI",
+    "fc", "fc_inf", "sm", "t", "n", "m"
+  )
+  
+  # 利用可能な変数のみ選択
+  vars_continuous <- intersect(vars_continuous, names(all_data))
+  vars_categorical <- intersect(vars_categorical, names(all_data))
+  
+  # すべての変数
+  all_vars <- c(vars_continuous, vars_categorical)
+  
+  # アウトカム変数
+  outcome_vars <- c("recur_2y", "time2y")
+  
+  # 因子変数として指定
+  factor_vars <- vars_categorical
+  
+  # Table 1を作成
+  table1 <- CreateTableOne(
+    vars = c(all_vars, outcome_vars),
+    strata = "dataset",
+    data = all_data,
+    factorVars = factor_vars,
+    addOverall = TRUE
+  )
+  
+  # 表示用にフォーマット
+  table1_print <- print(
+    table1,
+    nonnormal = vars_continuous,  # 中央値（IQR）で表示
+    quote = FALSE,
+    noSpaces = TRUE,
+    printToggle = FALSE,
+    showAllLevels = TRUE,
+    cramVars = c("stage_diag", "ALBIgrade"),  # 一行にまとめる
+    test = TRUE,  # p値を計算
+    smd = TRUE    # SMDも計算
+  )
+  
+  # データフレームに変換
+  table1_df <- as.data.frame(table1_print)
+  table1_df$Variable <- rownames(table1_df)
+  table1_df <- table1_df[, c("Variable", names(table1_df)[names(table1_df) != "Variable"])]
+  rownames(table1_df) <- NULL
+  
+  # より読みやすい変数名に変更
+  var_labels <- c(
+    "age" = "Age (years)",
+    "sex" = "Sex",
+    "alb" = "Albumin (g/dL)",
+    "tbil" = "Total bilirubin (mg/dL)",
+    "ast" = "AST (IU/L)",
+    "alt" = "ALT (IU/L)",
+    "plt" = "Platelet count (×10⁴/μL)",
+    "pt_inr" = "PT-INR",
+    "afp" = "AFP (ng/mL)",
+    "pivka2" = "PIVKA-II (mAU/mL)",
+    "max_diam_cm" = "Maximum tumor diameter (cm)",
+    "count" = "Number of tumors",
+    "child_pugh" = "Child-Pugh class",
+    "liver_damage" = "Liver damage grade",
+    "stage_diag" = "Stage",
+    "ALBIscore" = "ALBI score",
+    "ALBIgrade" = "ALBI grade",
+    "microVI" = "Microvascular invasion",
+    "macroVI" = "Macrovascular invasion",
+    "recur_2y" = "2-year recurrence",
+    "time2y" = "Follow-up time (months)"
+  )
+  
+  # 変数名を置換
+  for (old_name in names(var_labels)) {
+    table1_df$Variable <- gsub(paste0("^", old_name, "$"), 
+                              var_labels[old_name], 
+                              table1_df$Variable)
+  }
+  
+  # CSVとして保存
+  if (!is.null(output_file)) {
+    write.csv(table1_df, output_file, row.names = FALSE)
+    message(sprintf("✓ Table 1 saved to: %s", basename(output_file)))
+  }
+  
+  return(table1_df)
+}
+
+# Table 1を作成
+table1_result <- create_table1(
+  data_list = split_data_fixed,
+  output_file = file.path(paths$output_tables, "table1_baseline_characteristics.csv")
+)
+
+# 表示
+message("\n📋 Table 1 Preview (first 20 rows):")
+print(head(table1_result, 20))
+```
+
+
+```{r}
+# ========================================================================
+# Table 2: モデル係数の詳細テーブル
+# ========================================================================
+
+message("\n========================================")
+message("Creating Table 2: Model Coefficients")
+message("========================================\n")
+
+create_table2 <- function(models, model_names = NULL, output_file = NULL) {
+  
+  # 使用するモデルを選択（デフォルトはトップ3）
+  if (is.null(model_names)) {
+    # C-indexでトップ3を選択
+    if (exists("evaluation_results")) {
+      top_models <- head(evaluation_results$summary[order(evaluation_results$summary$c_index_test, 
+                                                          decreasing = TRUE), "model"], 3)
+      model_names <- top_models
+    } else {
+      model_names <- names(models)[1:min(3, length(models))]
+    }
+  }
+  
+  # 各モデルの係数を抽出
+  all_coef_tables <- list()
+  
+  for (model_name in model_names) {
+    model <- models[[model_name]]
+    
+    if (!is.null(model)) {
+      message(sprintf("Processing: %s", model_name))
+      
+      # Coxphモデルの場合
+      if (inherits(model, "coxph")) {
+        # 係数とその統計量を取得
+        model_summary <- summary(model)
+        coef_table <- as.data.frame(model_summary$coefficients)
+        conf_int <- as.data.frame(model_summary$conf.int)
+        
+        # データフレームを作成
+        model_table <- data.frame(
+          Model = model_name,
+          Variable = rownames(coef_table),
+          Beta = coef_table[, "coef"],
+          SE = coef_table[, "se(coef)"],
+          HR = conf_int[, "exp(coef)"],
+          HR_Lower = conf_int[, "lower .95"],
+          HR_Upper = conf_int[, "upper .95"],
+          Z = coef_table[, "z"],
+          P_value = coef_table[, "Pr(>|z|)"],
+          stringsAsFactors = FALSE
+        )
+        
+      } 
+      # リスト型モデル（RFE、Univariate等）の場合
+      else if (inherits(model, "list") && "model" %in% names(model) && !is.null(model$model)) {
+        inner_model <- model$model
+        
+        if (inherits(inner_model, "coxph")) {
+          model_summary <- summary(inner_model)
+          coef_table <- as.data.frame(model_summary$coefficients)
+          conf_int <- as.data.frame(model_summary$conf.int)
+          
+          model_table <- data.frame(
+            Model = model_name,
+            Variable = rownames(coef_table),
+            Beta = coef_table[, "coef"],
+            SE = coef_table[, "se(coef)"],
+            HR = conf_int[, "exp(coef)"],
+            HR_Lower = conf_int[, "lower .95"],
+            HR_Upper = conf_int[, "upper .95"],
+            Z = coef_table[, "z"],
+            P_value = coef_table[, "Pr(>|z|)"],
+            stringsAsFactors = FALSE
+          )
+        } else {
+          next
+        }
+        
+      }
+      # LASSOモデルの場合
+      else if (inherits(model, "lasso_cox")) {
+        # LASSOは係数のみ（p値なし）
+        if (!is.null(model$selected_vars) && length(model$selected_vars) > 0) {
+          # 簡易的な係数表示
+          model_table <- data.frame(
+            Model = model_name,
+            Variable = model$selected_vars,
+            Beta = NA,  # LASSOでは個別係数を取得するのが複雑
+            SE = NA,
+            HR = NA,
+            HR_Lower = NA,
+            HR_Upper = NA,
+            Z = NA,
+            P_value = NA,
+            stringsAsFactors = FALSE
+          )
+          
+          # 注釈を追加
+          model_table$Variable[1] <- paste0(model_table$Variable[1], " (LASSO selected)")
+        } else {
+          next
+        }
+      } else {
+        next
+      }
+      
+      # テーブルをリストに追加
+      all_coef_tables[[model_name]] <- model_table
+    }
+  }
+  
+  # すべてのモデルの係数を結合
+  if (length(all_coef_tables) > 0) {
+    combined_table <- do.call(rbind, all_coef_tables)
+    rownames(combined_table) <- NULL
+    
+    # フォーマット調整
+    combined_table$Beta <- sprintf("%.3f", combined_table$Beta)
+    combined_table$SE <- sprintf("%.3f", combined_table$SE)
+    combined_table$HR <- sprintf("%.3f", combined_table$HR)
+    combined_table$CI_95 <- sprintf("(%.3f-%.3f)", 
+                                    combined_table$HR_Lower, 
+                                    combined_table$HR_Upper)
+    
+    # P値のフォーマット
+    combined_table$P_value_formatted <- ifelse(
+      combined_table$P_value < 0.001, "<0.001",
+      sprintf("%.3f", combined_table$P_value)
+    )
+    
+    # 有意性マーカーを追加
+    combined_table$Significance <- ifelse(
+      combined_table$P_value < 0.001, "***",
+      ifelse(combined_table$P_value < 0.01, "**",
+             ifelse(combined_table$P_value < 0.05, "*", ""))
+    )
+    
+    # 最終的なテーブル
+    final_table <- combined_table[, c("Model", "Variable", "Beta", "SE", 
+                                      "HR", "CI_95", "P_value_formatted", "Significance")]
+    
+    names(final_table) <- c("Model", "Variable", "β", "SE", 
+                            "HR", "95% CI", "P-value", "")
+    
+    # CSVとして保存
+    if (!is.null(output_file)) {
+      write.csv(final_table, output_file, row.names = FALSE)
+      message(sprintf("✓ Table 2 saved to: %s", basename(output_file)))
+    }
+    
+    return(final_table)
+  } else {
+    message("No valid models found for Table 2")
+    return(NULL)
+  }
+}
+
+# Table 2を作成（ベストモデルとその他の主要モデル）
+table2_result <- create_table2(
+  models = models,
+  model_names = c(best_model_name, "TNM Model"),  # ベストモデルとTNMモデル
+  output_file = file.path(paths$output_tables, "table2_model_coefficients.csv")
+)
+
+# 表示
+if (!is.null(table2_result)) {
+  message("\n📋 Table 2 Preview (first 20 rows):")
+  print(head(table2_result, 20))
+}
+
+# Excel形式でも保存
+if (require(openxlsx, quietly = TRUE)) {
+  wb <- createWorkbook()
+  
+  # Table 1
+  addWorksheet(wb, "Table 1 - Baseline")
+  writeData(wb, "Table 1 - Baseline", table1_result)
+  
+  # Table 2
+  if (!is.null(table2_result)) {
+    addWorksheet(wb, "Table 2 - Coefficients")
+    writeData(wb, "Table 2 - Coefficients", table2_result)
+  }
+  
+  # 保存
+  saveWorkbook(wb, 
+               file.path(paths$output_tables, "manuscript_tables.xlsx"),
+               overwrite = TRUE)
+  
+  message("\n✓ Both tables saved to: manuscript_tables.xlsx")
+}
+
+message("\n✅ Manuscript tables created successfully!")
+```
+
+

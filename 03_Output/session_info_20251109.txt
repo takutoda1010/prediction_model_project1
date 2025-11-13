@@ -1,0 +1,58 @@
+=== Session Information ===
+Date: 2025-11-09 20:37:44 
+Execution time: 0.4 minutes 
+
+R version 4.4.2 (2024-10-31)
+Platform: aarch64-apple-darwin20
+Running under: macOS 26.0.1
+
+Matrix products: default
+BLAS:   /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib 
+LAPACK: /Library/Frameworks/R.framework/Versions/4.4-arm64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+time zone: Asia/Tokyo
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] tableone_0.13.2           logger_0.4.1              here_1.0.2                rmarkdown_2.29           
+ [5] knitr_1.50                gt_0.11.1                 ggsci_3.2.0               plotly_4.11.0            
+ [9] rms_8.0-0                 Hmisc_5.2-3               pROC_1.18.5               survminer_0.5.0          
+[13] ggpubr_0.6.0              caret_7.0-1               lattice_0.22-6            yaml_2.3.10              
+[17] data.table_1.16.4         purrr_1.0.2               tidyverse_2.0.0           lmtest_0.9-40            
+[21] zoo_1.8-12                sandwich_3.1-1            riskRegression_2025.05.20 cmprsk_2.2-12            
+[25] prodlim_2025.04.28        glmnet_4.1-10             Matrix_1.7-1              timeROC_0.4              
+[29] MASS_7.3-61               survival_3.8-3            patchwork_1.3.0           ggplot2_3.5.2            
+[33] tidyr_1.3.1               tibble_3.2.1              DataExplorer_0.8.4        lubridate_1.9.4          
+[37] forcats_1.0.1             stringr_1.5.2             dplyr_1.1.4               tidylog_1.1.0            
+[41] readr_2.1.5               readxl_1.4.5             
+
+loaded via a namespace (and not attached):
+  [1] RColorBrewer_1.1-3   rstudioapi_0.17.1    jsonlite_1.8.9       shape_1.4.6.1        magrittr_2.0.3      
+  [6] TH.data_1.1-3        farver_2.1.2         fs_1.6.5             ragg_1.3.3           vctrs_0.6.5         
+ [11] base64enc_0.1-3      rstatix_0.7.2        htmltools_0.5.8.1    polspline_1.1.25     survey_4.4-2        
+ [16] broom_1.0.10         cellranger_1.1.0     Formula_1.2-5        sass_0.4.9           parallelly_1.45.1   
+ [21] htmlwidgets_1.6.4    plyr_1.8.9           commonmark_1.9.2     networkD3_0.4.1      igraph_2.1.4        
+ [26] lifecycle_1.0.4      iterators_1.0.14     pkgconfig_2.0.3      R6_2.5.1             fastmap_1.2.0       
+ [31] future_1.67.0        digest_0.6.37        numDeriv_2016.8-1.1  colorspace_2.1-1     rprojroot_2.1.1     
+ [36] textshaping_0.4.1    labeling_0.4.3       fansi_1.0.6          km.ci_0.5-6          timechange_0.3.0    
+ [41] mgcv_1.9-1           httr_1.4.7           abind_1.4-8          compiler_4.4.2       withr_3.0.2         
+ [46] htmlTable_2.4.3      backports_1.5.0      DBI_1.2.3            carData_3.0-5        ggsignif_0.6.4      
+ [51] lava_1.8.1           quantreg_5.99.1      ModelMetrics_1.2.2.2 tools_4.4.2          foreign_0.8-87      
+ [56] future.apply_1.20.0  nnet_7.3-19          glue_1.8.0           mets_1.3.6           nlme_3.1-166        
+ [61] gridtext_0.1.5       grid_4.4.2           checkmate_2.3.2      cluster_2.1.6        reshape2_1.4.4      
+ [66] generics_0.1.3       recipes_1.3.1        gtable_0.3.6         tzdb_0.5.0           KMsurv_0.1-5        
+ [71] class_7.3-22         hms_1.1.3            xml2_1.3.6           car_3.1-3            utf8_1.2.4          
+ [76] markdown_1.13        foreach_1.5.2        pillar_1.9.0         mitools_2.4          splines_4.4.2       
+ [81] ggtext_0.1.2         SparseM_1.84-2       tidyselect_1.2.1     gridExtra_2.3        stats4_4.4.2        
+ [86] xfun_0.52            hardhat_1.4.2        timeDate_4051.111    stringi_1.8.4        lazyeval_0.2.2      
+ [91] pec_2025.06.24       evaluate_1.0.1       codetools_0.2-20     data.tree_1.2.0      cli_3.6.5           
+ [96] rpart_4.1.23         systemfonts_1.3.1    xtable_1.8-4         survMisc_0.5.6       Rcpp_1.0.13-1       
+[101] globals_0.18.0       parallel_4.4.2       MatrixModels_0.5-3   gower_1.0.2          listenv_0.9.1       
+[106] viridisLite_0.4.2    mvtnorm_1.3-2        timereg_2.0.6        ipred_0.9-15         scales_1.4.0        
+[111] crayon_1.5.3         clisymbols_1.2.0     rlang_1.1.6          multcomp_1.4-28     

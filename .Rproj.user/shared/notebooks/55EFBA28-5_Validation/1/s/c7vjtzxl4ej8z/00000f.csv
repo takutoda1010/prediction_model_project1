@@ -1,0 +1,17 @@
+"0","## ==== CAL-M7-CITL-2: 観測リスク（KM）と“差分CITL” ============================"
+"0","# KMで O(24) = 1 - S(24) を推定（再発=イベント、他は打ち切り）"
+"0","sf_obs <- survival::survfit(Surv(T_test, D_test) ~ 1)"
+"0","S24 <- try(as.numeric(summary(sf_obs, times = t_star)$surv), silent = TRUE)"
+"0","if (inherits(S24, ""try-error"") || !is.finite(S24)) {"
+"0","  # 24が超過していたら最後の生存を代用"
+"0","  S24 <- tail(sf_obs$surv, 1)"
+"0","}"
+"0","O24 <- 1 - S24"
+"0","CITL_diff <- mean(p_hat) - O24"
+"0",""
+"0","cat(sprintf(""[M7][CITL] Observed risk at 24m (KM) = %.4f\n"", O24))"
+"1","[M7][CITL] Observed risk at 24m (KM) = 0.4031
+"
+"0","cat(sprintf(""[M7][CITL] CITL (mean(pred) - observed) = %.4f\n"", CITL_diff))"
+"1","[M7][CITL] CITL (mean(pred) - observed) = NA
+"

@@ -1,0 +1,2929 @@
+---
+title: "RCS_age_to_time_hernia"
+author: "Takuto Yoshida"
+date: "2025-09-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 解析準備
+```{r}
+# -----------------------------
+# Install packages (simple list)
+# -----------------------------
+if (!require(tidyverse))       install.packages("tidyverse")
+if (!require(lubridate))       install.packages("lubridate")
+if (!require(janitor))         install.packages("janitor")
+if (!require(zoo))             install.packages("zoo")
+if (!require(hms))             install.packages("hms")
+if (!require(readxl))          install.packages("readxl")
+if (!require(sandwich))        install.packages("sandwich")
+if (!require(lmtest))          install.packages("lmtest")
+if (!require(broom))           install.packages("broom")
+if (!require(broom.helpers))   install.packages("broom.helpers")
+if (!require(systemfonts))     install.packages("systemfonts")
+if (!require(showtext))        install.packages("showtext")
+if (!require(sysfonts))        install.packages("sysfonts")
+if (!require(scales))          install.packages("scales")
+if (!require(skimr))           install.packages("skimr")
+if (!require(gtsummary))       install.packages("gtsummary")
+if (!require(MASS))            install.packages("MASS")
+if (!require(brglm2))          install.packages("brglm2")
+if (!require(tscount))         install.packages("tscount")
+if (!require(nlme))            install.packages("nlme")
+if (!require(DataExplorer))    install.packages("DataExplorer")
+if (!require(dplyr))           install.packages("dplyr")   # 明示的に使うので列挙
+
+# -----------------------------
+# Load libraries
+# -----------------------------
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(zoo)
+library(hms)
+library(readxl)
+library(sandwich)
+library(lmtest)
+library(broom)
+library(broom.helpers)
+library(systemfonts)
+library(showtext)
+library(sysfonts)
+library(scales)
+library(skimr)
+library(gtsummary)
+library(MASS)
+library(brglm2)
+library(tscount)
+library(nlme)
+library(DataExplorer)
+library(dplyr)
+```
+
+#データ読み込み
+```{r}
+data_dir  <- "/Users/yoshidatakuto/Dropbox/Hokkaido University/岩見沢市立総合病院"
+file_xlsx <- file.path(data_dir, "iwgh_df.xlsx")
+
+df_raw <- suppressWarnings(readxl::read_excel(file_xlsx, sheet = 1))
+ds00 <- df_raw %>% janitor::clean_names()
+```
+
+# データハンドリング
+ますは診断名を前処理する
+```{r}
+# ==========================================
+# 1) 診断名 前処理（空白正規化など）→ ds01
+# ==========================================
+ds01 <- ds00 %>%
+  dplyr::mutate(
+    diagnose_pre = as.character(diagnose_pre),
+    diagnose_pre_trim = diagnose_pre %>%
+      stringr::str_replace_all("[\u00A0\u3000]", " ") %>%  # NBSP/全角→半角
+      stringr::str_squish()
+  )
+
+```
+
+次に診断名がどのように記録されているかを確認し、今回利用したい診断名のIDだけを抽出できるようにする。
+```{r}
+# ==========================================================
+# 2) 「ヘルニア」含有の抽出 ＋ 分割用の正規化列 → ds02
+#    ついでに頻度確認テーブルを作って print
+# ==========================================================
+ds02 <- ds01 %>%
+  dplyr::filter(stringr::str_detect(diagnose_pre_trim, "ヘルニア")) %>%
+  dplyr::mutate(
+    diagnose_norm = diagnose_pre_trim %>%
+      stringr::str_replace_all("[／/・,，;；＋+]", "、") %>%
+      stringr::str_replace_all("[（）()]", "") %>%
+      stringr::str_squish()
+  )
+
+hernia_raw_counts <- ds02 %>%
+  dplyr::count(diagnose_pre_trim, sort = TRUE, name = "n")
+
+hernia_split_counts <- ds02 %>%
+  tidyr::separate_rows(diagnose_norm, sep = "、") %>%
+  dplyr::mutate(diagnose_norm = stringr::str_squish(diagnose_norm)) %>%
+  dplyr::filter(diagnose_norm != "") %>%
+  dplyr::count(diagnose_norm, sort = TRUE, name = "n")
+
+print(hernia_raw_counts, n = 50)
+print(hernia_split_counts, n = 50)
+
+```
+
+最終的に今回使用する「鼠径部ヘルニア」の症例だけ抽出する。
+```{r}
+# ==========================================================
+# 3) 鼡径/大腿/閉鎖孔などの「許可診断名」だけ残す → ds03
+#    （df_hernia_keep 相当）
+# ==========================================================
+keep_dx <- c(
+  "右鼡径ヘルニア","左鼡径ヘルニア","鼡径ヘルニア","両側鼡径ヘルニア","外鼡径ヘルニア",
+  "右外鼡径ヘルニア","鼡径ヘルニア嵌頓","右鼡径ヘルニア嵌頓","左外鼡径ヘルニア",
+  "閉鎖孔ヘルニア","閉鎖孔ヘルニア嵌頓","右大腿ヘルニア","大腿ヘルニア嵌頓",
+  "左鼡径ヘルニアの疑い","左鼡径ヘルニア嵌頓","右大腿ヘルニア嵌頓","大腿ヘルニア",
+  "右閉鎖孔ヘルニア","左閉鎖孔ヘルニア","左大腿ヘルニア","左閉鎖孔ヘルニア嵌頓",
+  "絞扼性鼡径ヘルニア","両鼡径ヘルニア","両側外鼡径ヘルニア","再発性鼡径ヘルニア",
+  "右再発性鼡径ヘルニア","右鼠径部ヘルニア","右鼡径ヘルニアの再発","右鼡径鼡径ヘルニア",
+  "右大腿ヘルニアの再発","右閉鎖孔ヘルニア嵌頓","右鼡径ヘルニアの疑い","左内鼡径ヘルニア",
+  "左再発性鼡径ヘルニア","壊疽性鼡径ヘルニア","大腿ヘルニア イレウス","大腿ヘルニア嵌頓の疑い",
+  "左下鼡径ヘルニア","左側鼡径ヘルニア嵌頓","左非還納性鼡径ヘルニア","左鼡径ヘルニアの再発"
+)
+
+ds03 <- ds00 %>%   # 元データからクリーン列を作ってフィルタ
+  dplyr::mutate(
+    dx_clean = diagnose_pre %>%
+      as.character() %>%
+      stringr::str_replace_all("[\u00A0\u3000]", " ") %>%
+      stringr::str_squish()
+  ) %>%
+  dplyr::filter(dx_clean %in% keep_dx)
+
+dplyr::count(ds03, dx_clean, sort = TRUE) %>% print(n = 50)
+
+```
+
+# 次に腸管切除を行ったかどうかを"resection"という変数を作成し、記録する。
+```{r}
+# ==========================================================
+# 4) Resectionフラグの作成（hougou / operation_post）→ ds04
+# ==========================================================
+stopifnot(nrow(ds03) > 0)
+
+col_hougou  <- names(ds03)[tolower(names(ds03)) == "hougou"]
+col_op_post <- names(ds03)[tolower(names(ds03)) == "operation_post"]
+if (!length(col_hougou) && !length(col_op_post)) {
+  stop("hougou か operation_post 列が必要です。")
+}
+
+resect_rx <- stringr::regex(
+  paste0(
+    "小腸切除|小腸部分切除|腸切除|腸管切除|回腸切除|空腸切除|小腸.*切除|腸.*切除",
+    "|enterectomy|small bowel.*resection|ileal.*resection|jejunal.*resection"
+  ), ignore_case = TRUE
+)
+
+ds04 <- ds03 %>%
+  dplyr::mutate(
+    hougou_flag = if (length(col_hougou)) {
+      x <- .data[[col_hougou[1]]]
+      as.integer(
+        !is.na(x) &
+          (x %in% c(1, TRUE) |
+           as.character(x) %in% c("1","Yes","YES","yes","TRUE","True","使用","あり","有"))
+      )
+    } else 0L,
+    operation_post_norm = if (length(col_op_post)) {
+      .data[[col_op_post[1]]] %>%
+        as.character() %>%
+        stringr::str_replace_all("[\u00A0\u3000]", " ") %>%
+        stringr::str_squish()
+    } else NA_character_,
+    resection = as.integer(
+      (hougou_flag == 1) |
+      (!is.na(operation_post_norm) & stringr::str_detect(operation_post_norm, resect_rx))
+    )
+  )
+```
+
+# 緊急症例
+本研究では緊急手術のみを対象とするためそれを抽出する
+```{r}
+# ==========================================================
+# 5) 緊急手術のみの抽出 → ds05
+#     ※元コード準拠：elective == 1 を残す（必要なら 0 に変更）
+# ==========================================================
+ds05 <- subset(ds04, elective == 1L)
+nrow(ds05)
+
+```
+
+#　分類
+大腿ヘルニア、閉鎖孔ヘルニアがわかるようにする
+```{r}
+# ==========================================================
+# 6) 大腿/閉鎖孔フラグ付与 → ds06
+# ==========================================================
+dx_col <- dplyr::case_when(
+  "diagnosis_pre" %in% names(ds05) ~ "diagnosis_pre",
+  "diagnose_pre"  %in% names(ds05) ~ "diagnose_pre",
+  "dx_clean"      %in% names(ds05) ~ "dx_clean",
+  TRUE ~ NA_character_
+)
+if (is.na(dx_col)) stop("診断名の列（diagnosis_pre / diagnose_pre / dx_clean）が見つかりません。")
+
+x <- ds05[[dx_col]] %>% as.character() %>% 
+     gsub("\u00A0|\u3000", " ", .) %>% gsub("\\s+", " ", .)
+
+ds06 <- ds05 %>%
+  dplyr::mutate(
+    obturator = as.integer(grepl("閉鎖孔ヘルニア", x)),
+    femoral   = as.integer(grepl("大腿ヘルニア",   x))
+  )
+
+```
+
+# 指標の作成
+```{r}
+# ==========================================================
+# 7) 代表指標の作成（BUN/Cr, CAR, etc.） → ds07
+# ==========================================================
+ds07 <- ds06
+
+if (all(c("bun","cre") %in% names(ds07)))
+  ds07$BUN_Cr  <- ifelse(ds07$cre > 0, ds07$bun/ds07$cre, NA_real_)
+if (all(c("crp","alb") %in% names(ds07)))
+  ds07$CAR     <- ifelse(ds07$alb > 0, ds07$crp/ds07$alb, NA_real_)
+if (all(c("ast","alt") %in% names(ds07)))
+  ds07$DeRitis <- ifelse(ds07$alt > 0, ds07$ast/ds07$alt, NA_real_)
+if (all(c("tp","alb") %in% names(ds07))) {
+  glob <- ds07$tp - ds07$alb
+  ds07$A_G <- ifelse(glob > 0, ds07$alb/glob, NA_real_)
+}
+if (all(c("na","k") %in% names(ds07)))
+  ds07$Na_K    <- ifelse(ds07$k  > 0, ds07$na/ds07$k,   NA_real_)
+
+if (all(c("age","ast","alt","plt") %in% names(ds07)))
+  ds07$FIB4 <- (ds07$age * ds07$ast) / (pmax(ds07$plt, 1e-6) * sqrt(pmax(ds07$alt, 1e-6)))
+
+if (all(c("ast","plt") %in% names(ds07)))
+  ds07$APRI <- (ds07$ast/40) / pmax(ds07$plt, 1e-6) * 100  # ULN(AST)=40 仮置
+
+if (all(c("tbil","alb") %in% names(ds07))) {
+  tb_umol <- ds07$tbil * 17.1
+  alb_gL  <- ds07$alb  * 10
+  ds07$ALBI <- 0.66*log10(pmax(tb_umol, 1e-6)) - 0.0852*alb_gL
+}
+
+if (all(c("ses","alone","seiho") %in% names(ds07)))
+  ds07$ses_alone_seiho <- interaction(ds07$ses, ds07$alone, ds07$seiho, drop = TRUE)
+
+```
+
+# EDA
+```{r}
+# ==========================================================
+# 9) DataExplorer でクイックEDA（ds07）
+# ==========================================================
+DataExplorer::plot_intro(ds07,   title = "Overview: ds07")
+DataExplorer::plot_missing(ds07, title = "Missingness: ds07")
+
+ds07_cat <- dplyr::select(ds07, where(is.factor) | where(is.character) | where(is.logical)) %>%
+            dplyr::mutate(dplyr::across(where(is.character), as.factor))
+if (ncol(ds07_cat) > 0) DataExplorer::plot_bar(ds07_cat, maxcat = 40, title = "Categorical Counts")
+
+ds07_num <- dplyr::select(ds07, where(is.numeric))
+if (ncol(ds07_num) > 0) DataExplorer::plot_histogram(ds07_num, ncol = 4, title = "Numeric Histograms")
+
+```
+
+# 型の変更
+```{r}
+# 出発点
+ds08 <- if (exists("ds07")) ds07 else ds00
+
+# --- sex（二分類；Female を参照）---
+ds08 <- ds08 |>
+  mutate(
+    sex = case_when(
+      tolower(as.character(sex)) %in% c("f","female","0","女","女性") ~ "Female",
+      tolower(as.character(sex)) %in% c("m","male","1","男","男性")   ~ "Male",
+      TRUE ~ as.character(sex)
+    )
+  ) |>
+  mutate(sex = factor(sex, levels = c("Female","Male")))  # ref = Female
+
+# --- smoke（二分類；0 を参照）---
+ds08 <- ds08 |> mutate(smoke = factor(smoke, levels = c(0,1)))
+
+# --- chf ---
+ds08 <- ds08 |> mutate(chf = factor(chf, levels = c(0,1)))
+
+# --- pad ---
+ds08 <- ds08 |> mutate(pad = factor(pad, levels = c(0,1)))
+
+# --- stroke ---
+ds08 <- ds08 |> mutate(stroke = factor(stroke, levels = c(0,1)))
+
+# --- copd ---
+ds08 <- ds08 |> mutate(copd = factor(copd, levels = c(0,1)))
+
+# --- connective ---
+ds08 <- ds08 |> mutate(connective = factor(connective, levels = c(0,1)))
+
+# --- pud ---
+ds08 <- ds08 |> mutate(pud = factor(pud, levels = c(0,1)))
+
+# --- hemiplegia ---
+ds08 <- ds08 |> mutate(hemiplegia = factor(hemiplegia, levels = c(0,1)))
+
+# --- ckd ---
+ds08 <- ds08 |> mutate(ckd = factor(ckd, levels = c(0,1)))
+
+# --- leukemia ---
+ds08 <- ds08 |> mutate(leukemia = factor(leukemia, levels = c(0,1)))
+
+# --- lymphoma ---
+ds08 <- ds08 |> mutate(lymphoma = factor(lymphoma, levels = c(0,1)))
+
+# --- constipation ---
+ds08 <- ds08 |> mutate(constipation = factor(constipation, levels = c(0,1)))
+
+# --- paraeso ---
+ds08 <- ds08 |> mutate(paraeso = factor(paraeso, levels = c(0,1)))
+
+# --- ralp ---
+ds08 <- ds08 |> mutate(ralp = factor(ralp, levels = c(0,1)))
+
+# --- boh / bph（typoの可能性に両対応；存在する方のみ実行）---
+if ("boh" %in% names(ds08)) ds08 <- ds08 |> mutate(boh = factor(boh, levels = c(0,1)))
+if ("bph" %in% names(ds08)) ds08 <- ds08 |> mutate(bph = factor(bph, levels = c(0,1)))
+
+# --- capd ---
+ds08 <- ds08 |> mutate(capd = factor(capd, levels = c(0,1)))
+
+# --- marfan ---
+ds08 <- ds08 |> mutate(marfan = factor(marfan, levels = c(0,1)))
+
+# --- aaa ---
+ds08 <- ds08 |> mutate(aaa = factor(aaa, levels = c(0,1)))
+
+# --- ami ---
+ds08 <- ds08 |> mutate(ami = factor(ami, levels = c(0,1)))
+
+# --- dementia / dimentia（両対応）---
+if ("dementia" %in% names(ds08))  ds08 <- ds08 |> mutate(dementia  = factor(dementia,  levels = c(0,1)))
+if ("dimentia" %in% names(ds08))  ds08 <- ds08 |> mutate(dimentia  = factor(dimentia,  levels = c(0,1)))
+
+# --- asthma ---
+ds08 <- ds08 |> mutate(asthma = factor(asthma, levels = c(0,1)))
+
+# --- dm_no ---
+ds08 <- ds08 |> mutate(dm_no = factor(dm_no, levels = c(0,1)))
+
+# --- dm_comp ---
+ds08 <- ds08 |> mutate(dm_comp = factor(dm_comp, levels = c(0,1)))
+
+# --- malignancy_nometa ---
+ds08 <- ds08 |> mutate(malignancy_nometa = factor(malignancy_nometa, levels = c(0,1)))
+
+# --- malignancy_meta ---
+ds08 <- ds08 |> mutate(malignancy_meta = factor(malignancy_meta, levels = c(0,1)))
+
+# --- liver_mild ---
+ds08 <- ds08 |> mutate(liver_mild = factor(liver_mild, levels = c(0,1)))
+
+# --- liver_severe ---
+ds08 <- ds08 |> mutate(liver_severe = factor(liver_severe, levels = c(0,1)))
+
+# --- aids ---
+ds08 <- ds08 |> mutate(aids = factor(aids, levels = c(0,1)))
+
+# --- ckd_modsev ---
+ds08 <- ds08 |> mutate(ckd_modsev = factor(ckd_modsev, levels = c(0,1)))
+
+# --- alone ---
+ds08 <- ds08 |> mutate(alone = factor(alone, levels = c(0,1)))
+
+# --- seiho ---
+ds08 <- ds08 |> mutate(seiho = factor(seiho, levels = c(0,1)))
+
+# --- resection ---
+ds08 <- ds08 |> mutate(resection = factor(resection, levels = c(0,1)))
+
+# --- transfusion ---
+ds08 <- ds08 |> mutate(transfusion = factor(transfusion, levels = c(0,1)))
+
+# --- drain ---
+ds08 <- ds08 |> mutate(drain = factor(drain, levels = c(0,1)))
+
+# --- jses ---
+ds08 <- ds08 |> mutate(jses = factor(jses, levels = c(0,1)))
+
+# --- reoperation ---
+ds08 <- ds08 |> mutate(reoperation = factor(reoperation, levels = c(0,1)))
+
+# --- readmission ---
+ds08 <- ds08 |> mutate(readmission = factor(readmission, levels = c(0,1)))
+
+# --- death ---
+ds08 <- ds08 |> mutate(death = factor(death, levels = c(0,1)))
+
+# --- 各種術後検査フラグ ---
+ds08 <- ds08 |> mutate(postop_head_ct  = factor(postop_head_ct,  levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_head_mri = factor(postop_head_mri, levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_abd_ct   = factor(postop_abd_ct,   levels = c(0,1)))
+ds08 <- ds08 |> mutate(consultation    = factor(consultation,    levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_ekg      = factor(postop_ekg,      levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_us       = factor(postop_us,       levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_tv       = factor(postop_tv,       levels = c(0,1)))
+ds08 <- ds08 |> mutate(urine_obs       = factor(urine_obs,       levels = c(0,1)))
+ds08 <- ds08 |> mutate(postop_ext_us   = factor(postop_ext_us,   levels = c(0,1)))
+
+# --- 追加指定：postop_fenta / postop_epi（存在する場合）---
+if ("postop_fenta" %in% names(ds08)) ds08 <- ds08 |> mutate(postop_fenta = factor(postop_fenta, levels = c(0,1)))
+if ("postop_epi"   %in% names(ds08)) ds08 <- ds08 |> mutate(postop_epi   = factor(postop_epi,   levels = c(0,1)))
+
+# --- steroid ---
+ds08 <- ds08 |> mutate(steroid = factor(steroid, levels = c(0,1)))
+
+# --- antithromb ---
+ds08 <- ds08 |> mutate(antithromb = factor(antithromb, levels = c(0,1)))
+
+# --- ses（三分類以上；0–8 を参照0に）---
+ds08 <- ds08 |> mutate(ses  = factor(ses,  levels = 0:8))
+
+# --- anes（三分類以上；0–2 を参照0に）---
+ds08 <- ds08 |> mutate(anes = factor(anes, levels = 0:2))
+
+# --- 順序変数（小さい順に順序付け；最小値が参照）---
+ds08 <- ds08 |> mutate(charlson = factor(charlson, levels = sort(unique(charlson)), ordered = TRUE))
+ds08 <- ds08 |> mutate(asa      = factor(asa,      levels = sort(unique(asa)),      ordered = TRUE))
+
+# 仕上げ確認（必要なら）
+str(ds08)
+
+```
+
+# 解析に必要な変数の作成
+術式が「腹腔鏡」か「鼠径部切開」かがわかるように
+鼠径部ヘルニアが「鼡径」か「大腿」か「閉鎖孔」かがわかるように
+```{r}
+# ========== ds08 から新規変数を作成 → ds09 ==========
+ds09 <- ds08
+
+# 1) 術式テキストのソース列を決定（あれば優先順で使用）
+op_col <- dplyr::case_when(
+  "operation_post_norm" %in% names(ds09) ~ "operation_post_norm",
+  "operation_post"      %in% names(ds09) ~ "operation_post",
+  "operation_pre"       %in% names(ds09) ~ "operation_pre",
+  TRUE ~ NA_character_
+)
+
+# 2) 術式テキスト（前後空白や全角スペースを正規化）
+if (!is.na(op_col)) {
+  ds09 <- ds09 |>
+    dplyr::mutate(
+      op_text = get(op_col) |>
+        as.character() |>
+        stringr::str_replace_all("[\u00A0\u3000]", " ") |>
+        stringr::str_squish()
+    )
+} else {
+  ds09 <- ds09 |> dplyr::mutate(op_text = NA_character_)
+}
+
+# 3) アプローチ判定（Lap / Open；MECE）
+lap_rx <- stringr::regex("腹腔鏡|鏡視|TAPP|TEP|laparos", ignore_case = TRUE)
+
+ds09 <- ds09 |>
+  dplyr::mutate(
+    approach = dplyr::case_when(
+      !is.na(op_text) & stringr::str_detect(op_text, lap_rx) ~ "Lap",
+      !is.na(op_text)                                        ~ "Open",
+      TRUE                                                   ~ NA_character_  # ※欠損はNA（必要なら "Open" に変更可）
+    )
+  )
+
+# 4) 因子化（参照 = Open）
+ds09 <- ds09 |> dplyr::mutate(approach = factor(approach, levels = c("Open","Lap")))
+
+
+# 5) （既存の0/1フラグを利用）ヘルニア型を作成：obturator / femoral / inguinal
+ds09 <- ds09 |> dplyr::mutate(obt_flag = suppressWarnings(as.integer(as.character(obturator))))
+ds09 <- ds09 |> dplyr::mutate(fem_flag = suppressWarnings(as.integer(as.character(femoral))))
+ds09 <- ds09 |>
+  dplyr::mutate(
+    hernia_type = dplyr::case_when(
+      obt_flag == 1 ~ "Obturator",
+      fem_flag == 1 ~ "Femoral",
+      TRUE          ~ "Inguinal"
+    )
+  )
+
+# 6) ヘルニア型を因子化（参照 = Inguinal）＆一時列を掃除
+ds09 <- ds09 |> dplyr::mutate(hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator")))
+ds09 <- ds09 |> dplyr::select(-obt_flag, -fem_flag)
+
+# （任意）確認
+dplyr::count(ds09, approach)
+dplyr::count(ds09, hernia_type)
+
+```
+
+```{r}
+library(dplyr)
+library(gtsummary)
+
+# 1) Table1に含めない列を除外（dplyr/any_of を明示）
+drop_vars <- c(
+  "id","ope_day","diagnose_pre","hight","weight","smoke","elective",
+  "operation_pre","operation_post","surgeon","outcome","dis_date",
+  "order_num","operationno","ad_date","ad_time","drain","hougou",
+  "fungou","reoperation","postop_head_ct","postop_head_mri",
+  "postop_abd_ct","consultation","postop_ekg","postop_us","postop_tv",
+  "urine_obs","postop_ext_us","op_seq","first_op","reop_this",
+  "adm_op_seq","first_op_in_adm","reop_in_adm","abx",
+  "readmission_date","death_date","dx_clean","hougou_flag",
+  "operation_post_norm","resection","obturator","femoral","op_text"
+)
+
+ds09_for_tbl <- ds09 %>%
+  dplyr::select(-tidyselect::any_of(drop_vars)) %>%     # ここがポイント
+  dplyr::mutate(dplyr::across(where(is.character), factor))
+
+# 2) 0/1の数値列は一括で factor(0,1) に変換（カテゴリ集計させる）
+bin_cols <- names(ds09_for_tbl)[sapply(ds09_for_tbl, function(x) {
+  is.numeric(x) && all(na.omit(x) %in% c(0, 1))
+})]
+if (length(bin_cols)) {
+  ds09_for_tbl <- ds09_for_tbl %>%
+    dplyr::mutate(dplyr::across(dplyr::all_of(bin_cols), ~ factor(., levels = c(0, 1))))
+}
+
+# 3) ses と anes は段階のあるカテゴリとして明示（未factorなら）
+if ("ses"  %in% names(ds09_for_tbl) && !is.factor(ds09_for_tbl$ses)) {
+  ds09_for_tbl <- ds09_for_tbl %>% dplyr::mutate(ses  = factor(ses,  levels = 0:8))
+}
+if ("anes" %in% names(ds09_for_tbl) && !is.factor(ds09_for_tbl$anes)) {
+  ds09_for_tbl <- ds09_for_tbl %>% dplyr::mutate(anes = factor(anes, levels = 0:2))
+}
+
+# 4) 連続変数の要約フォーマット：median (p25, p75) [min, max]
+cont_stat <- "{median} ({p25}, {p75}) [{min}, {max}]"
+
+# 5) Table 1（Overall）
+tbl1_overall <- ds09_for_tbl %>%
+  gtsummary::tbl_summary(
+    type      = list(where(is.numeric) ~ "continuous"),
+    statistic = list(all_continuous() ~ cont_stat),
+    digits    = list(all_continuous() ~ 1),
+    missing   = "ifany"
+  ) %>%
+  gtsummary::add_n() %>%
+  gtsummary::bold_labels()
+
+tbl1_overall
+
+```
+
+```{r}
+# ==== 追加：Table 1（Overall + Resection別）====
+library(gtsummary)
+library(dplyr)
+
+# 1) グループ化用の resection 列を足す（0/1 → No/Yes）
+#    ※ ds09_for_tbl は resection を落としているので、ds09 から同順で持ってくる
+resection_fac <- {
+  v <- ds09$resection
+  if (is.factor(v)) v <- as.character(v)
+  v <- suppressWarnings(as.numeric(v))
+  factor(ifelse(v %in% c(0,1), v, NA), levels = c(0,1), labels = c("No","Yes"))
+}
+
+ds_tbl_by <- ds09_for_tbl %>%
+  tibble::add_column(resection = resection_fac, .before = 1)
+
+# 2) 群別Table 1（Overall 列 + No/Yes 列 + p値）
+#    - 連続は中央値(IQR)、カテゴリはn(%)、欠測は ifany
+#    - 連続の検定はWilcoxon、カテゴリはFisher（セル小の想定）
+cont_stat <- "{median} ({p25}, {p75}) [{min}, {max}]"
+
+tbl1_by_resection <-
+  ds_tbl_by %>%
+  gtsummary::tbl_summary(
+    by        = resection,                                     # ★群別
+    type      = list(where(is.numeric) ~ "continuous"),
+    statistic = list(all_continuous() ~ cont_stat),
+    digits    = list(all_continuous() ~ 1),
+    missing   = "ifany"
+  ) %>%
+  gtsummary::add_overall(last = TRUE) %>%                      # ★Overall 列を右端に
+  gtsummary::add_p(
+    test = list(
+      all_continuous()  ~ "wilcox.test",
+      all_categorical() ~ "fisher.test"
+    )
+  ) %>%
+  gtsummary::add_n() %>%
+  gtsummary::bold_labels()
+
+tbl1_by_resection
+```
+
+
+# アウトカムの要約
+```{r}
+library(dplyr)
+library(gtsummary)
+library(lubridate)
+
+# 術後在院日数 los_postop を作成（未作成なら）
+if (all(c("ope_day","dis_date") %in% names(ds09))) {
+  ds09 <- ds09 %>%
+    mutate(
+      ope_day_d  = suppressWarnings(lubridate::as_date(ope_day)),
+      dis_date_d = suppressWarnings(lubridate::as_date(dis_date)),
+      los_postop = ifelse(!is.na(ope_day_d) & !is.na(dis_date_d),
+                          as.numeric(dis_date_d - ope_day_d) + 1, NA_real_),
+      los_postop = ifelse(los_postop < 0, NA_real_, los_postop)
+    )
+}
+
+# --- カテゴリカル・アウトカム要約（主要：resection） ---
+cat_outcomes <- c("resection","death","readmission","reoperation")
+cat_outcomes <- intersect(cat_outcomes, names(ds09))
+
+as01_factor <- function(x) {
+  v <- x; if (is.factor(v)) v <- as.character(v)
+  v <- suppressWarnings(as.numeric(v))
+  factor(v, levels = c(0,1), labels = c("No","Yes"))
+}
+
+ds_out_cat <- ds09 %>%
+  mutate(across(tidyselect::all_of(cat_outcomes), as01_factor))
+
+tbl_out_cat <-
+  ds_out_cat %>%
+  dplyr::select(tidyselect::all_of(cat_outcomes)) %>%
+  gtsummary::tbl_summary(
+    type      = list(everything() ~ "categorical"),
+    statistic = list(all_categorical() ~ "{n} ({p}%)"),
+    missing   = "ifany",
+    label     = list(
+      resection   ~ "腸切除（主要評価項目）",
+      death       ~ "院内死亡",
+      readmission ~ "再入院",
+      reoperation ~ "再手術"
+    )
+  ) %>%
+  gtsummary::add_n() %>%
+  gtsummary::bold_labels()
+
+tbl_out_cat
+
+# --- 連続アウトカム（参考） ---
+cont_outcomes <- intersect(c("cost","opetime","bleeding","los_postop"), names(ds09))
+
+tbl_out_cont <-
+  ds09 %>%
+  dplyr::select(tidyselect::all_of(cont_outcomes)) %>%
+  gtsummary::tbl_summary(
+    type      = list(all_continuous() ~ "continuous"),
+    statistic = list(all_continuous() ~ "{mean} ({sd}), {median} ({p25}, {p75}) [{min}, {max}]"),
+    digits    = list(all_continuous() ~ 1),
+    missing   = "ifany",
+    label     = list(
+      cost       ~ "医療費",
+      opetime    ~ "手術時間",
+      bleeding   ~ "出血量",
+      los_postop ~ "術後在院日数"
+    )
+  ) %>%
+  gtsummary::bold_labels()
+
+tbl_out_cont
+
+```
+
+#　アウトカムとそれぞれの変数の関係
+## リスク因子が連続、アウトカムが二値
+## リスク因子がカテゴリカル、アウトカムが二値
+```{r}
+# =========================================================
+# 可視化：resection と各リスク因子の関係（Table1使用変数ベース）
+# 必要: ds09, ds09_for_tbl（前のTable1作成時のオブジェクト）
+# =========================================================
+library(dplyr)
+library(ggplot2)
+library(rlang)
+
+# -- 0) 安全策：Table1用データが無ければ作っておく（軽い再現） --
+if (!exists("ds09_for_tbl")) {
+  drop_vars <- c(
+    "id","ope_day","diagnose_pre","hight","weight","smoke","elective",
+    "operation_pre","operation_post","surgeon","outcome","dis_date",
+    "order_num","operationno","ad_date","ad_time","drain","hougou",
+    "fungou","reoperation","postop_head_ct","postop_head_mri",
+    "postop_abd_ct","consultation","postop_ekg","postop_us","postop_tv",
+    "urine_obs","postop_ext_us","op_seq","first_op","reop_this",
+    "adm_op_seq","first_op_in_adm","reop_in_adm","abx",
+    "readmission_date","death_date","dx_clean","hougou_flag",
+    "operation_post_norm","resection","obturator","femoral","op_text"
+  )
+  ds09_for_tbl <- ds09 %>%
+    dplyr::select(-tidyselect::any_of(drop_vars)) %>%
+    dplyr::mutate(dplyr::across(where(is.character), factor))
+
+  # 0/1数値列はカテゴリに
+  bin_cols <- names(ds09_for_tbl)[sapply(ds09_for_tbl, function(x) is.numeric(x) && all(na.omit(x) %in% c(0,1)))]
+  if (length(bin_cols)) {
+    ds09_for_tbl <- ds09_for_tbl %>%
+      dplyr::mutate(dplyr::across(dplyr::all_of(bin_cols), ~ factor(., levels = c(0,1))))
+  }
+}
+
+# -- 1) 可視化用の土台データ（resectionを数値0/1に整形して追加） --
+ds_plot <- ds09 %>%
+  mutate(
+    resection_num = {
+      v <- resection
+      if (is.factor(v)) v <- as.character(v)
+      v <- suppressWarnings(as.numeric(v))
+      ifelse(v %in% c(0,1), v, NA_real_)
+    }
+  )
+
+# Table1で使う変数名
+vars_tbl1 <- names(ds09_for_tbl)
+
+# 連続 / カテゴリ の仕分け（Table1基準）
+cont_vars <- vars_tbl1[sapply(ds09_for_tbl, is.numeric)]
+cat_vars  <- vars_tbl1[sapply(ds09_for_tbl, is.factor)]
+
+# -- 2) 関数：カテゴリ → イベント割合プロット --------------------
+plot_event_cat <- function(df, xvar, yvar = "resection_num", title = NULL) {
+  xsym <- sym(xvar)
+  df %>%
+    filter(!is.na(!!xsym), !is.na(.data[[yvar]])) %>%
+    group_by(!!xsym) %>%
+    summarise(
+      n   = n(),
+      evt = sum(.data[[yvar]] == 1, na.rm = TRUE),
+      prop = evt / n * 100
+    ) %>%
+    ggplot(aes(x = !!xsym, y = prop, group = 1)) +
+    geom_point(size = 2) +
+    geom_line() +
+    labs(x = xvar, y = "Event proportion (%)",
+         title = title %||% paste0(xvar, " vs resection")) +
+    theme_minimal(base_size = 12)
+}
+
+# -- 3) 関数：連続 → 分位で区切りイベント割合プロット --------------
+plot_event_cont <- function(df, xvar, yvar = "resection_num", n_bins = 4, title = NULL) {
+  x <- df[[xvar]]
+  # 分位点（重複排除）
+  brks <- unique(stats::quantile(x, probs = seq(0, 1, length.out = n_bins + 1), na.rm = TRUE, type = 7))
+  if (length(brks) <= 2L) {
+    # ほぼ離散/一定ならプロットをスキップ
+    return(ggplot() + theme_void() + ggtitle(paste0(xvar, ": insufficient variation")))
+  }
+  df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]])) %>%
+    mutate(bin = cut(.data[[xvar]], breaks = brks, include.lowest = TRUE, dig.lab = 6)) %>%
+    group_by(bin) %>%
+    summarise(
+      n   = n(),
+      evt = sum(.data[[yvar]] == 1, na.rm = TRUE),
+      prop = evt / n * 100,
+      .groups = "drop"
+    ) %>%
+    ggplot(aes(x = bin, y = prop, group = 1)) +
+    geom_point(size = 2) +
+    geom_line() +
+    labs(x = paste0(xvar, " (", n_bins, "-quantile bins)"),
+         y = "Event proportion (%)",
+         title = title %||% paste0(xvar, " vs resection")) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+
+# -- 4) まとめて作図：リストで返す ---------------------------------
+plots_cat  <- setNames(lapply(cat_vars,  function(v) plot_event_cat (ds_plot, v)), cat_vars)
+plots_cont <- setNames(lapply(cont_vars, function(v) plot_event_cont(ds_plot, v, n_bins = 4)), cont_vars)
+
+# 使い方例：個別に表示
+print(plots_cat$sex)
+print(plots_cat$approach)
+print(plots_cat$hernia_type)
+print(plots_cont$age)
+print(plots_cont$BUN_Cr)
+print(plots_cont$tbil)
+print(plots_cont$bun)
+
+# 保存例（必要な図だけ）
+# ggsave("eventrate_age.png",   plots_cont$age,   width = 6, height = 4, dpi = 300)
+# ggsave("eventrate_sex.png",   plots_cat$sex,    width = 6, height = 4, dpi = 300)
+# ggsave("eventrate_approach.png", plots_cat$approach, width = 6, height = 4, dpi = 300)
+
+```
+#　その他の変数も
+```{r}
+# ぜんぶ一気に「表示」＋「PDF保存」する簡便コード
+# （patchwork を使って複数図をタイル表示）
+# 
+# if (!require(patchwork)) install.packages("patchwork")
+# library(patchwork)
+# 
+# # 1) そのまま順番にコンソールへ表示（全部）
+# invisible(lapply(plots_cat,  print))   # カテゴリ変数
+# invisible(lapply(plots_cont, print))   # 連続変数
+# 
+# # 2) 見やすくタイル表示（RStudioのViewerにまとめて）
+# wrap_plots(plots_cat,  ncol = 3)       # カテゴリまとめ
+# wrap_plots(plots_cont, ncol = 3)       # 連続まとめ
+# 
+# # 3) 6枚/ページでPDFに出力（A4横 or Letter横）
+# plot_pages <- function(plot_list, ncol = 3, nrow = 2, file = "plots.pdf",
+#                        width = 11, height = 8.5) {
+#   pp <- split(plot_list, ceiling(seq_along(plot_list)/(ncol*nrow)))
+#   pdf(file, width = width, height = height)
+#   for (pg in pp) print(wrap_plots(pg, ncol = ncol, nrow = nrow))
+#   dev.off()
+# }
+# 
+# plot_pages(plots_cat,  file = "eventrate_cat.pdf")   # カテゴリ
+# plot_pages(plots_cont, file = "eventrate_cont.pdf")  # 連続
+# # 保存先は作業ディレクトリ。必要ならパスを指定してください。
+
+```
+
+
+# パッケージのバージョンを揃える必要があるらしい。
+```{r}
+# --- 1) 依存パッケージを更新＆ロード（衝突回避つき） ---
+ensure_pkg <- function(pkg, ver) {
+  ok <- requireNamespace(pkg, quietly = TRUE) &&
+        utils::packageVersion(pkg) >= ver
+  if (!ok) install.packages(pkg)
+}
+ensure_pkg("cards",  "0.7.0")
+ensure_pkg("cardx",  "0.3.0")
+ensure_pkg("gtsummary", "2.0.0")  # 念のため
+
+# すでに古い 'cards' がロードされていたらアンロード
+if ("package:cards" %in% search()) detach("package:cards", unload = TRUE)
+
+library(cards)
+library(cardx)
+library(gtsummary)
+library(dplyr)
+
+```
+
+
+
+# 一気に単回帰分析
+```{r}
+# ============================================================
+# 単回帰（resectionに対する各リスク因子）— gtsummary 一括
+# 対象変数は「Table1で使った列（= ds09_for_tbl）」に限る
+# 出力は OR（95%CI）・p値
+# ============================================================
+
+library(dplyr)
+library(gtsummary)
+
+# 0) 解析用データ：resection を数値0/1に（=イベント側を1でモデル化）
+ds09_uv <- ds09 %>%
+  mutate(
+    resection_num = {
+      v <- resection
+      if (is.factor(v)) v <- as.character(v)
+      v <- suppressWarnings(as.numeric(v))
+      ifelse(v %in% c(0, 1), v, NA_real_)
+    }
+  )
+
+# 1) 「Table1で使った変数」だけを対象に（存在・変動のない列は除外）
+stopifnot(exists("ds09_for_tbl"))
+include_vars <- names(ds09_for_tbl)
+
+# 変動がある列だけ残す（ユニーク値が2以上）
+include_vars <- include_vars[sapply(ds09_uv[include_vars], function(x) dplyr::n_distinct(x, na.rm = TRUE) >= 2)]
+
+# 2) 一括・単回帰（glm binomial）— ORで表示
+tbl_uv_or <-
+  gtsummary::tbl_uvregression(
+    data        = ds09_uv,
+    y           = resection_num,              # アウトカム（0/1）
+    method      = glm,
+    method.args = list(family = binomial()),
+    include     = tidyselect::all_of(include_vars),
+    exponentiate = TRUE                       # OR表示
+  ) |>
+  gtsummary::bold_labels()
+
+tbl_uv_or
+
+```
+
+# p<0.05の変数を知りたい
+```{r}
+# gtsummaryオブジェクトから内部テーブルを取り出す
+df_uv <- tbl_uv_or$table_body %>%
+  dplyr::transmute(
+    variable,                    # 変数名
+    var_label,                   # 表示名
+    level = label,               # 因子の水準名(連続はNA)
+    OR = estimate, conf.low, conf.high,
+    p.value
+  )
+
+# p値 ≤ 0.05 の行（レベル別）だけ抽出
+sig_rows <- df_uv %>%
+  dplyr::filter(!is.na(p.value) & p.value <= 0.05)
+
+sig_rows
+
+```
+
+
+# 手術操作に向かう前の変数選択
+相関の強い変数を確認
+```{r}
+# ===== 術前候補のみ：resection と相関（Spearman/Pearson）ランキング =====
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# 0) 相関の方法を選択（"spearman" or "pearson"）
+method <- "spearman"
+
+# 1) 解析用データ（resectionは既に0/1）
+dat <- ds09 %>%
+  mutate(y = suppressWarnings(as.numeric(as.character(resection)))) %>%
+  filter(y %in% c(0, 1))
+
+# 2) 術前では使わない変数を除外
+drop_vars <- c(
+  "id","ope_day","diagnose_pre","hight","weight","smoke","elective",
+  "operation_pre","operation_post","surgeon","outcome","dis_date",
+  "order_num","operationno","ad_date","ad_time","drain","hougou",
+  "fungou","reoperation","postop_head_ct","postop_head_mri",
+  "postop_abd_ct","consultation","postop_ekg","postop_us","postop_tv",
+  "urine_obs","postop_ext_us","op_seq","first_op","reop_this",
+  "adm_op_seq","first_op_in_adm","reop_in_adm","abx",
+  "readmission_date","death_date","dx_clean","hougou_flag",
+  "operation_post_norm","resection","obturator","femoral","op_text"
+)
+drop_more <- c("resection","death","readmission","reoperation",   # アウトカム系
+               "cost","bleeding","transfusion","opetime","ope_time")  # 術中・費用
+vars_all <- setdiff(names(dat), union(drop_vars, drop_more))
+
+# 3) 「主に見たい」術前候補（存在するものだけ残す）
+want_vars <- c(
+  # 基本
+  "age","sex","bmi","charlson","ses","alone","seiho","hernia_type",
+  # 併存症
+  "chf","pad","stroke","copd","connective","pud","hemiplegia","ckd",
+  "leukemia","lymphoma","constipation","paraeso","ralp","bph","capd",
+  "marfan","aaa","ami","dimentia","dementia","asthma","dm_no","dm_comp",
+  "malignancy_nometa","malignancy_meta","liver_mild","liver_severe","aids",
+  "ckd_modsev",
+  # 採血
+  "wbc","rbc","hb","hct","plt","ptinr","aptt","pt","crp","tp","alb","bun",
+  "cre","tbil","ast","alt","ld","ggt","che","ck","na","k","cl","ca","glu","hba1c",
+  # 指標
+  "APRI","FIB4","CAR","DeRitis","A_G","Na_K","ALBI"
+)
+cands <- intersect(vars_all, want_vars)
+
+# 4) 相関計算関数
+corr_one <- function(v){
+  x <- dat[[v]]
+  # データが少なすぎる/変動しない場合はスキップ
+  if (sum(!is.na(x) & !is.na(dat$y)) < 5 || dplyr::n_distinct(x, na.rm = TRUE) < 2) return(NULL)
+
+  # numeric
+  if (is.numeric(x)) {
+    keep <- complete.cases(x, dat$y)
+    cc <- suppressWarnings(cor(x[keep], dat$y[keep], method = method))
+    return(tibble(variable = v, type = "numeric", level = NA_character_, corr = cc, n = sum(keep)))
+  }
+
+  # ordered factor（段階性あり：Spearman推奨）
+  if (is.ordered(x)) {
+    xi <- as.integer(x)
+    keep <- complete.cases(xi, dat$y)
+    cc <- suppressWarnings(cor(xi[keep], dat$y[keep], method = method))
+    return(tibble(variable = v, type = "ordered", level = paste(levels(x), collapse = ">"),
+                  corr = cc, n = sum(keep)))
+  }
+
+  # binary factor
+  if (is.factor(x) && nlevels(x) == 2) {
+    xi <- as.integer(x) - 1  # 第1水準を0に
+    keep <- complete.cases(xi, dat$y)
+    cc <- suppressWarnings(cor(xi[keep], dat$y[keep], method = method))
+    levs <- levels(x)
+    return(tibble(variable = v, type = "binary factor",
+                  level = paste0(levs[2], " vs ", levs[1]), corr = cc, n = sum(keep)))
+  }
+
+  # multi-level factor（各水準 vs その他 → 最大|相関|の水準を代表）
+  if (is.factor(x) && nlevels(x) > 2) {
+    levs <- levels(x)
+    res <- lapply(levs[-1], function(L){
+      xi <- as.integer(x == L)
+      keep <- complete.cases(xi, dat$y)
+      if (sum(keep) < 5) return(NULL)
+      cc <- suppressWarnings(cor(xi[keep], dat$y[keep], method = method))
+      tibble(variable = v, type = "multilevel factor",
+             level = paste0(L, " vs others"), corr = cc, n = sum(keep))
+    })
+    res <- dplyr::bind_rows(res)
+    if (nrow(res)) return(dplyr::slice_max(res, order_by = abs(corr), n = 1))
+  }
+
+  NULL
+}
+
+# 5) 実行：強い順に並べる
+res_preop <- dplyr::bind_rows(lapply(cands, corr_one)) %>%
+  arrange(desc(abs(corr)))
+
+# 上位3つ
+top3_preop <- dplyr::slice_head(res_preop, n = 7)
+print(top3_preop, n = 7)
+
+# （全体を見たい場合）
+# print(res_preop, n = Inf)
+
+```
+
+# bun, tbilとresectionとの関係をバイオリンプロットで図示
+```{r}
+# ==== Violin: bun / tbil vs resection (y) ====
+library(dplyr)
+library(ggplot2)
+if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
+library(patchwork)
+
+# 下準備：0/1 → "No/Yes"
+ds_plot <- ds09 %>%
+  transmute(
+    bun  = suppressWarnings(as.numeric(bun)),
+    tbil = suppressWarnings(as.numeric(tbil)),
+    cl   = suppressWarnings(as.numeric(cl)),
+    resection = factor(as.numeric(as.character(resection)),
+                       levels = c(0,1), labels = c("No","Yes"))
+  )
+
+make_violin <- function(df, xvar, xlab){
+  ggplot(df, aes(x = .data[[xvar]], y = resection)) +
+    geom_violin(fill = "grey90", color = "grey40", scale = "width",
+                trim = TRUE, orientation = "y") +
+    geom_point(position = position_jitter(height = 0.06, width = 0),
+               size = 1.6, alpha = 0.6) +
+    scale_y_discrete(limits = c("Yes","No")) +   # 上にYes/下にNo（スライド風）
+    labs(x = xlab, y = "resection", title = paste0(xvar, " vs resection")) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"))
+}
+
+p_bun  <- make_violin(ds_plot %>% filter(!is.na(bun),  !is.na(resection)),
+                      "bun",  "BUN (mg/dL)")
+p_tbil <- make_violin(ds_plot %>% filter(!is.na(tbil), !is.na(resection)),
+                      "tbil", "T-bil (mg/dL)")
+p_cl <- make_violin(ds_plot %>% filter(!is.na(cl), !is.na(resection)),
+                      "cl", "Cl (mg/dL)")
+
+# 並べて表示
+p_bun + p_tbil
+p_cl
+
+# （任意）保存
+# ggsave("violin_bun_tbil_vs_resection.png", p_bun + p_tbil, width = 10, height = 4, dpi = 300)
+
+
+```
+
+```{r}
+# ==== Violin: bun / tbil vs resection (y), color by hernia_type ====
+library(dplyr)
+library(ggplot2)
+if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
+library(patchwork)
+
+# 下準備：0/1 → "No/Yes" ＋ ヘルニア型（参照：ds09 で作成済み）
+ds_plot <- ds09 %>%
+  transmute(
+    bun  = suppressWarnings(as.numeric(bun)),
+    tbil = suppressWarnings(as.numeric(tbil)),
+    cl   = suppressWarnings(as.numeric(cl)),
+    resection = factor(as.numeric(as.character(resection)),
+                       levels = c(0,1), labels = c("No","Yes")),
+    hernia_type = factor(hernia_type,
+                         levels = c("Inguinal","Femoral","Obturator"))
+  )
+
+# カラーパレット（ColorBrewerベースのパステル調＋色弱配慮）
+pal_hernia <- c(
+  "Inguinal"  = "#A6CEE3",  # light blue
+  "Femoral"   = "#B2DF8A",  # light green
+  "Obturator" = "#FDBF6F"   # light orange
+)
+
+# 形（冗長表現で色弱にも優しい）
+shape_hernia <- c(
+  "Inguinal"  = 16,  # circle
+  "Femoral"   = 17,  # triangle
+  "Obturator" = 15   # square
+)
+
+make_violin <- function(df, xvar, xlab){
+  ggplot(df, aes(x = .data[[xvar]], y = resection)) +
+    # バイオリンは中立色で（点の色が主役）
+    geom_violin(fill = "grey92", color = "grey50", scale = "width",
+                trim = TRUE, orientation = "y") +
+    # ヘルニア型で色・形を付与、縦方向にだけ微ジッター
+    geom_point(aes(color = hernia_type, shape = hernia_type),
+               position = position_jitter(height = 0.06, width = 0),
+               size = 1.9, alpha = 0.8, na.rm = TRUE) +
+    scale_color_manual(values = pal_hernia, name = "Hernia type") +
+    scale_shape_manual(values = shape_hernia, name = "Hernia type") +
+    scale_y_discrete(limits = c("Yes","No")) +   # 上にYes/下にNo（スライド準拠）
+    labs(x = xlab, y = "resection", title = paste0(xvar, " vs resection")) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold"),
+      legend.position = "bottom",
+      legend.box = "vertical"
+    )
+}
+
+p_bun  <- make_violin(
+  ds_plot %>% filter(!is.na(bun),  !is.na(resection), !is.na(hernia_type)),
+  "bun",  "BUN (mg/dL)"
+)
+p_tbil <- make_violin(
+  ds_plot %>% filter(!is.na(tbil), !is.na(resection), !is.na(hernia_type)),
+  "tbil", "T-bil (mg/dL)"
+)
+
+# 並べて表示
+p_bun + p_tbil
+# （任意保存）
+# ggsave("violin_bun_tbil_colored.png", p_bun + p_tbil, width = 10, height = 4, dpi = 300)
+
+```
+
+
+# 主解析
+```{r}
+# ================================================
+# 主要解析①：bun_tertile（BUN三分位）で多変量ロジスティック
+# 主要解析②：tbil（連続, mg/dL）で多変量ロジスティック
+# 調整：age, sex, hernia_type（ref: Female / Inguinal）
+# 出力：調整OR, 95%CI, p値（gtsummary）
+# ================================================
+
+library(dplyr)
+library(gtsummary)
+
+## 共通：前処理（参照カテゴリの設定）
+ds10_base <- ds09 %>%
+  mutate(
+    resection   = as.numeric(as.character(resection)),          # 0/1
+    age         = as.numeric(age),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    sex         = factor(sex, levels = c("Female","Male")),     # ref = Female
+    hernia_type = factor(hernia_type,
+                         levels = c("Inguinal","Femoral","Obturator")) # ref = Inguinal
+  )
+
+# -------------------------
+# 主要解析①：BUN（三分位）
+# -------------------------
+ds10_bun <- ds10_base %>%
+  filter(!is.na(resection), !is.na(bun), !is.na(age),
+         !is.na(sex), !is.na(hernia_type)) %>%
+  mutate(
+    # 三分位（個数がほぼ等しくなるように）：1=低, 3=高
+    bun_tertile = factor(dplyr::ntile(bun, 3),
+                         levels = 1:3,
+                         labels = c("T1 (low)","T2","T3 (high)"))
+  )
+
+fit_bun <- glm(
+  resection ~ bun_tertile + age + sex + hernia_type,
+  data = ds10_bun, family = binomial()
+)
+
+tbl_bun <-
+  tbl_regression(
+    fit_bun, exponentiate = TRUE,
+    label = list(
+      bun_tertile ~ "BUN (tertiles)",
+      age         ~ "Age (per year)",
+      sex         ~ "Sex (ref = Female)",
+      hernia_type ~ "Hernia type (ref = Inguinal)"
+    )
+  ) |>
+  add_global_p(include = c(bun_tertile, sex, hernia_type)) |>
+  bold_labels()
+
+tbl_bun
+cat("BUN-Model | N:", stats::nobs(fit_bun),
+    "| events:", sum(ds10_bun$resection == 1, na.rm = TRUE), "\n")
+
+# -------------------------
+# 主要解析②：T-bil（連続）
+# -------------------------
+ds10_tbil <- ds10_base %>%
+  filter(!is.na(resection), !is.na(tbil), !is.na(age),
+         !is.na(sex), !is.na(hernia_type))
+
+fit_tbil <- glm(
+  resection ~ tbil + age + sex + hernia_type,
+  data = ds10_tbil, family = binomial()
+)
+
+tbl_tbil <-
+  tbl_regression(
+    fit_tbil, exponentiate = TRUE,
+    label = list(
+      tbil        ~ "T-bil (per 1 mg/dL)",
+      age         ~ "Age (per year)",
+      sex         ~ "Sex (ref = Female)",
+      hernia_type ~ "Hernia type (ref = Inguinal)"
+    ),
+    show_single_row = c(tbil)   # 連続は1行表示
+  ) |>
+  add_global_p(include = c(sex, hernia_type)) |>
+  bold_labels()
+
+tbl_tbil
+cat("T-bil-Model | N:", stats::nobs(fit_tbil),
+    "| events:", sum(ds10_tbil$resection == 1, na.rm = TRUE), "\n")
+
+# （任意）2表を横並び表示
+# tbl_merge(list(tbl_bun, tbl_tbil), tab_spanner = c("**BUN tertiles**", "**T-bil (continuous)**"))
+
+```
+
+```{r}
+library(dplyr)
+library(gtsummary)
+
+# ベースの整形（参照カテゴリの統一）
+ds10_base <- ds09 %>%
+  mutate(
+    resection   = as.numeric(as.character(resection)),
+    age         = as.numeric(age),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    sex         = factor(sex, levels = c("Female","Male")), # ref=Female
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator")) # ref=Inguinal
+  )
+
+# 欠測除外 & 10mg/dLスケール
+ds_bun_cont <- ds10_base %>%
+  filter(!is.na(resection), !is.na(bun), !is.na(age), !is.na(sex), !is.na(hernia_type)) %>%
+  mutate(bun10 = bun / 10)
+
+fit_bun_cont <- glm(
+  resection ~ bun10 + age + sex + hernia_type,
+  family = binomial(), data = ds_bun_cont
+)
+
+tbl_bun_cont <-
+  tbl_regression(
+    fit_bun_cont, exponentiate = TRUE,
+    label = list(
+      bun10       ~ "BUN (per 10 mg/dL)",
+      age         ~ "Age (per year)",
+      sex         ~ "Sex (ref = Female)",
+      hernia_type ~ "Hernia type (ref = Inguinal)"
+    ),
+    show_single_row = c(bun10)
+  ) |>
+  add_global_p(include = c(sex, hernia_type)) |>
+  bold_labels()
+
+tbl_bun_cont
+cat("N:", stats::nobs(fit_bun_cont),
+    "| events:", sum(ds_bun_cont$resection == 1, na.rm = TRUE), "\n")
+
+```
+
+
+# T-bilとBUNに対してRCS解析
+```{r}
+# =========================================
+# RCSで BUN / T-bil と resection の関係を可視化
+# 年齢・性別・ヘルニア型で調整（ロジスティック）
+# 参照点（OR=1）は任意指定：BUN=中央値、T-bil=1.0mg/dL（例）
+# 出力：調整ORカーブ＋95%CI、ノット表示、増加開始点（lo>1）
+# LRT（線形vsRCS）とAICも表示
+# =========================================
+
+library(dplyr)
+library(ggplot2)
+library(splines)
+
+# ---- 0) データ整形（参照カテゴリの統一） ----
+ds_base <- ds09 %>%
+  mutate(
+    y           = suppressWarnings(as.numeric(as.character(resection))), # 0/1
+    age         = suppressWarnings(as.numeric(age)),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    sex         = factor(sex, levels = c("Female","Male")),             # ref=Female
+    hernia_type = factor(hernia_type,
+                         levels = c("Inguinal","Femoral","Obturator"))  # ref=Inguinal
+  )
+
+# ---- 1) RCS 可視化の関数（var ∈ {"bun","tbil"}） ----
+rcs_plot <- function(dat, var, v_label,
+                     ref = NA_real_,
+                     # 推奨ノット：Boundary 5%/95%、Interior 35%/65%（df=3）
+                     boundary_probs = c(.05, .95),
+                     interior_probs = c(.35, .65)) {
+
+  stopifnot(var %in% c("bun","tbil"))
+
+  # 完全ケース：目的変数・説明変数・調整因子
+  df <- dat %>%
+    filter(!is.na(y), !is.na(.data[[var]]),
+           !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+  # ノット
+  x <- df[[var]]
+  bkn <- as.numeric(quantile(x, boundary_probs, na.rm = TRUE))
+  ikn <- as.numeric(quantile(x, interior_probs, na.rm = TRUE))
+  # 参照点（未指定なら中央値）
+  if (is.na(ref)) ref <- as.numeric(stats::median(x, na.rm = TRUE))
+
+  # --- モデル ---
+  form_rcs <- as.formula(
+    paste0("y ~ ns(", var, ", knots = ikn, Boundary.knots = bkn) + age + sex + hernia_type")
+  )
+  form_lin <- as.formula(
+    paste0("y ~ ", var, " + age + sex + hernia_type")
+  )
+
+  fit_rcs <- glm(form_rcs, family = binomial(), data = df)
+  fit_lin <- glm(form_lin, family = binomial(), data = df)
+
+  # 非線形性の検定（線形 vs RCS）
+  lrt <- anova(fit_lin, fit_rcs, test = "LRT")
+  lrt_p <- tryCatch(lrt[["Pr(>Chi)"]][2], error = function(e) NA_real_)
+
+  # 予測グリッド（1–99%範囲で）
+  gx <- seq(bkn[1], bkn[2], length.out = 200)
+  newd <- data.frame(
+    age         = median(df$age, na.rm = TRUE),
+    sex         = factor("Female", levels = levels(df$sex)),
+    hernia_type = factor("Inguinal", levels = levels(df$hernia_type))
+  )
+  newd <- cbind(newd, setNames(list(gx), var))
+
+  # 参照点データ
+  refd <- data.frame(
+    age         = median(df$age, na.rm = TRUE),
+    sex         = factor("Female", levels = levels(df$sex)),
+    hernia_type = factor("Inguinal", levels = levels(df$hernia_type))
+  )
+  refd <- cbind(refd, setNames(list(ref), var))
+
+  # 線形予測値と差（Δη）をデルタ法でCI
+  X    <- model.matrix(delete.response(terms(fit_rcs)), newd)
+  Xref <- model.matrix(delete.response(terms(fit_rcs)), refd)
+  b    <- coef(fit_rcs); V <- vcov(fit_rcs)
+
+  eta     <- as.vector(X %*% b)
+  eta_ref <- as.numeric(Xref %*% b)
+  # Var(η - η_ref) = Var(η) + Var(η_ref) - 2 Cov(η, η_ref)
+  var_eta <- diag(X %*% V %*% t(X))
+  var_ref <- as.numeric(Xref %*% V %*% t(Xref))
+  cov_er  <- as.vector(X %*% V %*% t(Xref))
+  se      <- sqrt(pmax(var_eta + var_ref - 2 * cov_er, 0))
+
+  plotdf <- data.frame(
+    x  = gx,
+    OR = exp(eta - eta_ref),
+    lo = exp((eta - eta_ref) - 1.96 * se),
+    hi = exp((eta - eta_ref) + 1.96 * se)
+  )
+
+  # 「増え始め」の閾値（lo>1 を初めて満たす点；右側のみ）
+  thr_idx <- which(plotdf$x >= ref & plotdf$lo > 1)
+  thr_val <- if (length(thr_idx)) plotdf$x[min(thr_idx)] else NA_real_
+
+  # 図
+  p <- ggplot(plotdf, aes(x = x, y = OR)) +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.18) +
+    geom_line(size = 1) +
+    geom_hline(yintercept = 1, linetype = 2) +
+    geom_vline(xintercept = ref, linetype = 3) +
+    geom_vline(xintercept = ikn, linetype = "dotted", alpha = 0.6) +
+    geom_vline(xintercept = bkn, linetype = "dashed", alpha = 0.4) +
+    geom_rug(data = df, aes(x = .data[[var]], y = NULL), sides = "b", alpha = 0.2) +
+    labs(
+      x = v_label,
+      y = paste0("Adjusted OR (ref = ", signif(ref, 3), ")"),
+      title = paste0(v_label, " and Resection (RCS adjusted)"),
+      subtitle = paste0(
+        "LRT nonlinearity p = ", ifelse(is.na(lrt_p), "NA", signif(lrt_p, 3)),
+        " | AIC(linear) = ", round(AIC(fit_lin), 1),
+        " | AIC(RCS) = ", round(AIC(fit_rcs), 1),
+        if (!is.na(thr_val)) paste0(" | ↑ starts ~ ", signif(thr_val, 3)) else ""
+      )
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"))
+
+  list(
+    plot      = p,
+    data      = plotdf,
+    knots     = list(boundary = bkn, interior = ikn),
+    ref_value = ref,
+    threshold = thr_val,
+    lrt_p     = lrt_p,
+    AIC       = c(linear = AIC(fit_lin), rcs = AIC(fit_rcs)),
+    n_used    = nrow(df),
+    n_events  = sum(df$y == 1, na.rm = TRUE)
+  )
+}
+
+# ---- 2) 実行：BUN（参照=中央値）/ T-bil（参照=1.0mg/dL） ----
+res_bun  <- rcs_plot(ds_base, var = "bun",  v_label = "BUN (mg/dL)",  ref = NA_real_)  # ← medianを自動採用
+res_tbil <- rcs_plot(ds_base, var = "tbil", v_label = "T-bil (mg/dL)", ref = 1.0)
+
+# ---- 3) 表示 ----
+print(res_bun$plot)
+cat(sprintf("BUN: n=%d, events=%d | LRT p=%.3g | AIC lin=%.1f, rcs=%.1f | threshold≈%s\n",
+            res_bun$n_used, res_bun$n_events, res_bun$lrt_p, res_bun$AIC["linear"], res_bun$AIC["rcs"],
+            ifelse(is.na(res_bun$threshold), "NA", signif(res_bun$threshold,3))))
+
+print(res_tbil$plot)
+cat(sprintf("T-bil: n=%d, events=%d | LRT p=%.3g | AIC lin=%.1f, rcs=%.1f | threshold≈%s\n",
+            res_tbil$n_used, res_tbil$n_events, res_tbil$lrt_p, res_tbil$AIC["linear"], res_tbil$AIC["rcs"],
+            ifelse(is.na(res_tbil$threshold), "NA", signif(res_tbil$threshold,3))))
+
+# （任意）並べて保存
+if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
+library(patchwork)
+g <- res_bun$plot + res_tbil$plot
+ggsave("rcs_bun_tbil.png", g, width = 10, height = 4, dpi = 300)
+
+```
+
+# リスク比（修正ポアソン）とリスク差（修正最小二乗法）
+```{r}
+# =========================================================
+# 修正ポアソン回帰（RR）＆ 修正最小二乗回帰（RD）
+#  - 目的変数：resection（0/1 数値に統一）
+#  - 主要曝露：BUN（連続；10mg/dLあたり）／T-bil（連続；1mg/dLあたり）
+#  - 調整：age, sex(Female基準), hernia_type(Inguinal基準)
+#  - RR：family = poisson, eform = TRUE（指数変換）
+#  - RD：family = gaussian, eform = FALSE（そのまま）
+#  - ロバスト分散：sandwich::vcovHC を使用
+# =========================================================
+
+# 0) ヘルパー：robust-GLM を tidy に返す（rqlm 互換）
+rqlm <- function(formula, family, eform = FALSE, data) {
+  fit <- glm(formula, family = family, data = data)
+  V   <- sandwich::vcovHC(fit, type = "HC0")
+  ct  <- lmtest::coeftest(fit, vcov. = V)
+
+  est <- ct[, 1]; se <- ct[, 2]; p <- ct[, 4]
+  lo  <- est - 1.96 * se
+  hi  <- est + 1.96 * se
+
+  if (isTRUE(eform)) {
+    est <- exp(est); lo <- exp(lo); hi <- exp(hi)
+  }
+
+  tibble::tibble(
+    term      = rownames(ct),
+    estimate  = as.numeric(est),
+    conf.low  = as.numeric(lo),
+    conf.high = as.numeric(hi),
+    p.value   = as.numeric(p)
+  )
+}
+
+# 1) データ整形・共通の基準設定
+ds_mpr <- ds09 %>%
+  dplyr::mutate(
+    # outcome を数値0/1へ（factor不可の注意に対応）
+    resection = {
+      v <- resection
+      if (is.factor(v)) v <- as.character(v)
+      v <- suppressWarnings(as.numeric(v))
+      ifelse(v %in% c(0, 1), v, NA_real_)
+    },
+    age         = suppressWarnings(as.numeric(age)),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    bun10       = bun / 10,                                    # 10 mg/dL あたり
+    sex         = factor(sex, levels = c("Female", "Male")),   # 参照 = Female
+    hernia_type = factor(hernia_type,
+                         levels = c("Inguinal","Femoral","Obturator")) # 参照 = Inguinal
+  ) %>%
+  dplyr::filter(!is.na(resection), !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+# -------------------------
+# A) BUN（連続；10mg/dLあたり）
+# -------------------------
+ds_bun <- ds_mpr %>% dplyr::filter(!is.na(bun10))
+
+# 修正ポアソン（RR）
+rr_bun <- rqlm(resection ~ bun10 + age + sex + hernia_type,
+               family = poisson, eform = TRUE, data = ds_bun) %>%
+  dplyr::filter(term != "(Intercept)")
+
+# 修正最小二乗（RD）
+rd_bun <- rqlm(resection ~ bun10 + age + sex + hernia_type,
+               family = gaussian, eform = FALSE, data = ds_bun) %>%
+  dplyr::filter(term != "(Intercept)")
+
+rr_bun
+rd_bun
+
+# -------------------------
+# B) T-bil（連続；1mg/dLあたり）
+# -------------------------
+ds_tbil <- ds_mpr %>% dplyr::filter(!is.na(tbil))
+
+# 修正ポアソン（RR）
+rr_tbil <- rqlm(resection ~ tbil + age + sex + hernia_type,
+                family = poisson, eform = TRUE, data = ds_tbil) %>%
+  dplyr::filter(term != "(Intercept)")
+
+# 修正最小二乗（RD）
+rd_tbil <- rqlm(resection ~ tbil + age + sex + hernia_type,
+                family = gaussian, eform = FALSE, data = ds_tbil) %>%
+  dplyr::filter(term != "(Intercept)")
+
+rr_tbil
+rd_tbil
+
+# 参考：使用症例・イベント数
+cat("BUN models  | N =", nrow(ds_bun),  "| events =", sum(ds_bun$resection==1),  "\n")
+cat("T-bil models| N =", nrow(ds_tbil), "| events =", sum(ds_tbil$resection==1), "\n")
+
+```
+# Crude, AdjustedのTable化
+```{r}
+# ============================
+# Table 2（T-bil / BUN 別）
+# ============================
+
+# ---- 前処理：共通ベース ----
+ds_base <- ds09 %>%
+  dplyr::mutate(
+    y           = {v <- resection; if (is.factor(v)) v <- as.character(v); v <- suppressWarnings(as.numeric(v)); ifelse(v %in% c(0,1), v, NA_real_)},
+    age         = suppressWarnings(as.numeric(age)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    bun         = suppressWarnings(as.numeric(bun)),
+    bun10       = bun/10,                                              # 10 mg/dL あたり
+    sex         = factor(sex, levels = c("Female","Male")),            # ref = Female
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator")) # ref = Inguinal
+  )
+
+# ---- ロバストGLM → tidy（OR/RRは指数化、RDはそのまま） ----
+rqlm <- function(formula, family, eform = FALSE, data) {
+  fit <- glm(formula, family = family, data = data)
+  V   <- sandwich::vcovHC(fit, type = "HC0")
+  ct  <- lmtest::coeftest(fit, vcov. = V)
+  est <- ct[,1]; se <- ct[,2]; p <- ct[,4]
+  lo  <- est - 1.96*se; hi <- est + 1.96*se
+  if (isTRUE(eform)) { est <- exp(est); lo <- exp(lo); hi <- exp(hi) }
+  tibble::tibble(term = rownames(ct), estimate = as.numeric(est),
+                 conf.low = as.numeric(lo), conf.high = as.numeric(hi),
+                 p.value = as.numeric(p))
+}
+
+fmt_ratio <- function(tbl, term) {
+  r <- dplyr::filter(tbl, term == !!term)
+  if (!nrow(r)) return(NA_character_)
+  sprintf("%.2f (%.2f, %.2f)", r$estimate, r$conf.low, r$conf.high)
+}
+fmt_rd <- function(tbl, term) {
+  r <- dplyr::filter(tbl, term == !!term)
+  if (!nrow(r)) return(NA_character_)
+  sprintf("%.1f (%.1f, %.1f)", 100*r$estimate, 100*r$conf.low, 100*r$conf.high)
+}
+
+# crude モデルを作るヘルパー（変数ごとに完全ケースへ絞る）
+crude_fits <- function(var, data) {
+  df <- dplyr::filter(data, !is.na(.data$y), !is.na(.data[[var]]))
+  list(
+    or = rqlm(stats::as.formula(paste0("y ~ ", var)), binomial(), TRUE,  df) |> dplyr::filter(term!="(Intercept)"),
+    rr = rqlm(stats::as.formula(paste0("y ~ ", var)), poisson(),  TRUE,  df) |> dplyr::filter(term!="(Intercept)"),
+    rd = rqlm(stats::as.formula(paste0("y ~ ", var)), gaussian(), FALSE, df) |> dplyr::filter(term!="(Intercept)")
+  )
+}
+
+# 1枚の表を作る（exposure は "tbil" または "bun10"）
+build_table <- function(exposure = c("tbil","bun10")) {
+  exposure <- match.arg(exposure)
+  exp_label <- if (exposure == "tbil") "T-bil" else "BUN"
+  exp_value <- if (exposure == "tbil") "per 1 mg/dL" else "per 10 mg/dL"
+
+  # 調整モデル用（完全ケース）
+  df_adj <- ds_base |>
+    dplyr::filter(!is.na(y), !is.na(.data[[exposure]]),
+                  !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+  fit_or_adj <- rqlm(stats::as.formula(paste0("y ~ ", exposure, " + age + sex + hernia_type")),
+                     binomial(), TRUE,  df_adj) |> dplyr::filter(term!="(Intercept)")
+  fit_rr_adj <- rqlm(stats::as.formula(paste0("y ~ ", exposure, " + age + sex + hernia_type")),
+                     poisson(),  TRUE,  df_adj) |> dplyr::filter(term!="(Intercept)")
+  fit_rd_adj <- rqlm(stats::as.formula(paste0("y ~ ", exposure, " + age + sex + hernia_type")),
+                     gaussian(), FALSE, df_adj) |> dplyr::filter(term!="(Intercept)")
+
+  # --- 連続：exposure ---
+  cr_exp <- crude_fits(exposure, ds_base)
+  row_exp <- tibble::tibble(
+    Variable = exp_label, Value = exp_value,
+    `Crude OR (95% CI)`    = fmt_ratio(cr_exp$or, exposure),
+    `Adjusted OR (95% CI)` = fmt_ratio(fit_or_adj, exposure),
+    `Crude RR (95% CI)`    = fmt_ratio(cr_exp$rr, exposure),
+    `Adjusted RR (95% CI)` = fmt_ratio(fit_rr_adj, exposure),
+    `Crude RD% (95% CI)`   = fmt_rd(cr_exp$rd, exposure),
+    `Adjusted RD% (95% CI)`= fmt_rd(fit_rd_adj, exposure)
+  )
+
+  # --- 連続：age ---
+  cr_age <- crude_fits("age", ds_base)
+  row_age <- tibble::tibble(
+    Variable = "Age", Value = "per 1 year",
+    `Crude OR (95% CI)`    = fmt_ratio(cr_age$or, "age"),
+    `Adjusted OR (95% CI)` = fmt_ratio(fit_or_adj, "age"),
+    `Crude RR (95% CI)`    = fmt_ratio(cr_age$rr, "age"),
+    `Adjusted RR (95% CI)` = fmt_ratio(fit_rr_adj, "age"),
+    `Crude RD% (95% CI)`   = fmt_rd(cr_age$rd, "age"),
+    `Adjusted RD% (95% CI)`= fmt_rd(fit_rd_adj, "age")
+  )
+
+  # --- カテゴリ：sex（ref=Female）---
+  cr_sex <- crude_fits("sex", ds_base)
+  row_sex_ref <- tibble::tibble(Variable="Sex", Value="Female (ref)",
+                                `Crude OR (95% CI)`="—", `Adjusted OR (95% CI)`="—",
+                                `Crude RR (95% CI)`="—", `Adjusted RR (95% CI)`="—",
+                                `Crude RD% (95% CI)`="—", `Adjusted RD% (95% CI)`="—")
+  row_sex_m <- tibble::tibble(
+    Variable="Sex", Value="Male",
+    `Crude OR (95% CI)`    = fmt_ratio(cr_sex$or, "sexMale"),
+    `Adjusted OR (95% CI)` = fmt_ratio(fit_or_adj, "sexMale"),
+    `Crude RR (95% CI)`    = fmt_ratio(cr_sex$rr, "sexMale"),
+    `Adjusted RR (95% CI)` = fmt_ratio(fit_rr_adj, "sexMale"),
+    `Crude RD% (95% CI)`   = fmt_rd(cr_sex$rd, "sexMale"),
+    `Adjusted RD% (95% CI)`= fmt_rd(fit_rd_adj, "sexMale")
+  )
+
+  # --- カテゴリ：hernia_type（ref=Inguinal）---
+  cr_ht <- crude_fits("hernia_type", ds_base)
+  row_ht_ref <- tibble::tibble(Variable="Hernia type", Value="Inguinal (ref)",
+                               `Crude OR (95% CI)`="—", `Adjusted OR (95% CI)`="—",
+                               `Crude RR (95% CI)`="—", `Adjusted RR (95% CI)`="—",
+                               `Crude RD% (95% CI)`="—", `Adjusted RD% (95% CI)`="—")
+  row_ht_f <- tibble::tibble(
+    Variable="Hernia type", Value="Femoral",
+    `Crude OR (95% CI)`    = fmt_ratio(cr_ht$or, "hernia_typeFemoral"),
+    `Adjusted OR (95% CI)` = fmt_ratio(fit_or_adj, "hernia_typeFemoral"),
+    `Crude RR (95% CI)`    = fmt_ratio(cr_ht$rr, "hernia_typeFemoral"),
+    `Adjusted RR (95% CI)` = fmt_ratio(fit_rr_adj, "hernia_typeFemoral"),
+    `Crude RD% (95% CI)`   = fmt_rd(cr_ht$rd, "hernia_typeFemoral"),
+    `Adjusted RD% (95% CI)`= fmt_rd(fit_rd_adj, "hernia_typeFemoral")
+  )
+  row_ht_o <- tibble::tibble(
+    Variable="Hernia type", Value="Obturator",
+    `Crude OR (95% CI)`    = fmt_ratio(cr_ht$or, "hernia_typeObturator"),
+    `Adjusted OR (95% CI)` = fmt_ratio(fit_or_adj, "hernia_typeObturator"),
+    `Crude RR (95% CI)`    = fmt_ratio(cr_ht$rr, "hernia_typeObturator"),
+    `Adjusted RR (95% CI)` = fmt_ratio(fit_rr_adj, "hernia_typeObturator"),
+    `Crude RD% (95% CI)`   = fmt_rd(cr_ht$rd, "hernia_typeObturator"),
+    `Adjusted RD% (95% CI)`= fmt_rd(fit_rd_adj, "hernia_typeObturator")
+  )
+
+  dplyr::bind_rows(
+    row_exp,
+    row_age,
+    row_sex_ref, row_sex_m,
+    row_ht_ref,  row_ht_f, row_ht_o
+  )
+}
+
+# ---- 出力：2枚の表 ----
+table_tbil <- build_table("tbil")
+table_bun  <- build_table("bun10")
+
+# 表示（必要に応じて gt/kable へ）
+table_tbil
+table_bun
+# knitr::kable(table_tbil, align = "llrrrrrr", caption = "Associations with Resection (T-bil model)")
+# knitr::kable(table_bun,  align = "llrrrrrr", caption = "Associations with Resection (BUN model)")
+
+```
+
+# For Results
+```{r}
+# ================================
+# Flow counts & narrative generator
+# ================================
+library(dplyr)
+library(glue)
+
+# ユーティリティ：安全に列の有無を判定
+has_cols <- function(df, cols) all(cols %in% names(df))
+has_any  <- function(df, cols) any(cols %in% names(df))
+
+# 0) “スクリーニング”母集団（ds02想定）
+#    ※「ヘルニア」抽出後の症例を“screened”と定義
+n_screened <- nrow(ds02)
+
+# 1) 非対象ヘルニア型の除外（ds02 → ds03 の差分）
+n_excl_nontarget <- nrow(ds02) - nrow(ds03)
+
+# 2) 選択的手術（elective）/非観血的整復（non-operative）に相当する除外
+#    ※本解析では“緊急のみ採用”として ds05 <- subset(ds04, elective == 1L) を既に実施。
+#    ここでは elective 列がある場合に、緊急でないもの（!=1L）を除外件数としてカウント。
+if (has_any(ds04, "elective")) {
+  # ds04 時点で対象ヘルニアに絞ったうえで、緊急でない症例数を数える
+  n_excl_elective_nonop <- sum(ds04$elective != 1L | is.na(ds04$elective))
+} else {
+  n_excl_elective_nonop <- 0L
+}
+
+# 3) 小児の除外（<18歳）
+if (has_any(ds04, "age")) {
+  n_excl_pediatric <- sum(suppressWarnings(as.numeric(ds04$age)) < 18, na.rm = TRUE)
+} else {
+  n_excl_pediatric <- 0L
+}
+
+# 4) 同一入院内の重複手術（初回のみ解析）
+#    優先：first_op_in_adm == 1 があればそれを採用。
+#    無ければ adm_op_seq があれば最小値（初回）だけ残す。
+dedupe_info <- 0L
+ds04_dedup <- ds04
+if (has_any(ds04, "first_op_in_adm")) {
+  keep <- ds04$first_op_in_adm == 1
+  dedupe_info <- sum(!keep & !is.na(keep))
+  ds04_dedup <- ds04[is.na(keep) | keep, , drop = FALSE]
+} else if (has_any(ds04, "adm_op_seq")) {
+  # 入院を識別するIDが無い前提では adm_op_seq==1 を“初回”とみなす
+  keep <- ds04$adm_op_seq == 1
+  dedupe_info <- sum(!keep & !is.na(keep))
+  ds04_dedup <- ds04[is.na(keep) | keep, , drop = FALSE]
+}
+n_excl_duplicate <- dedupe_info
+
+# 5) 解析に必須の術前データ欠測の除外
+#    必須項目：resection, age, sex, hernia_type, bun, tbil
+need_vars <- c("resection", "age", "sex", "hernia_type", "bun", "tbil")
+
+df_need <- ds04_dedup
+# “hernia_type”は後で ds09 で作る列なので、ここでは代替（obturator/femoral → inguinal合成）も試みる
+if (!"hernia_type" %in% names(df_need)) {
+  if (has_cols(df_need, c("obturator","femoral"))) {
+    df_need <- df_need %>%
+      mutate(
+        obt_flag = suppressWarnings(as.integer(as.character(obturator))),
+        fem_flag = suppressWarnings(as.integer(as.character(femoral))),
+        hernia_type = case_when(
+          obt_flag == 1 ~ "Obturator",
+          fem_flag == 1 ~ "Femoral",
+          TRUE          ~ "Inguinal"
+        )
+      )
+  }
+}
+
+# 欠測判定に使うベクトルを用意（ある列だけ）
+need_here <- intersect(need_vars, names(df_need))
+
+is_missing_row <- function(df, cols) {
+  apply(df[, cols, drop = FALSE], 1, function(r) any(is.na(r) | (is.character(r) & r=="")))
+}
+
+if (length(need_here) > 0) {
+  miss_mask <- is_missing_row(df_need, need_here)
+  n_excl_missing <- sum(miss_mask)
+} else {
+  n_excl_missing <- 0L
+}
+
+# 6) 最終解析コホート（ds09 を最終とするのが自然）
+#    すでに ds09 で hernia_type/approach 等の整形を終えているため、
+#    最終は “主要アウトカムresection・主要共変量(age,sex,hernia_type) が非欠測” に限定
+ds_final <- ds09 %>%
+  mutate(
+    resection = {v <- resection; if (is.factor(v)) v <- as.character(v); v <- suppressWarnings(as.numeric(v)); ifelse(v %in% c(0,1), v, NA_real_)},
+    age  = suppressWarnings(as.numeric(age)),
+    bun  = suppressWarnings(as.numeric(bun)),
+    tbil = suppressWarnings(as.numeric(tbil))
+  ) %>%
+  filter(!is.na(resection), !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+n_final <- nrow(ds_final)
+
+# 7) 完全症例数（主モデル用）
+n_cc_bun  <- ds_final %>% filter(!is.na(bun))  %>% nrow()
+n_cc_tbil <- ds_final %>% filter(!is.na(tbil)) %>% nrow()
+
+# 8) 文面を自動生成（必要に応じて glue の数字書式を調整）
+text_flow <- glue(
+  "During the study period from April 2017 to March 2025, a total of {n_screened} ",
+  "patients presenting with emergency groin hernias were screened for eligibility. ",
+  "After applying exclusion criteria—which included {n_excl_elective_nonop} cases of elective repair ",
+  "or non-operative reduction, {n_excl_nontarget} for non-target hernia types (e.g., ventral or incisional), ",
+  "{n_excl_pediatric} pediatric cases, {n_excl_duplicate} duplicate procedures within the same admission, ",
+  "and {n_excl_missing} for missing essential preoperative data—a final cohort of {n_final} patients ",
+  "was included in the primary analysis. The study's patient selection process is detailed in the flow ",
+  "diagram in Figure 1. The number of complete cases available for the primary multivariable models was ",
+  "{n_cc_bun} for the BUN models and {n_cc_tbil} for the T-bil models."
+)
+
+cat(text_flow, "\n")
+
+```
+
+
+# Results 
+## Descriptive data
+```{r}
+# 例：Tableの作成時に p値の表示桁を決めておく
+tbl1_by_resection <- ds09_for_tbl %>%
+  mutate(resection = factor(as.numeric(as.character(ds09$resection)),
+                            levels = c(0,1), labels = c("No","Yes"))) %>%
+  tbl_summary(
+    by        = resection,
+    type      = list(where(is.numeric) ~ "continuous"),
+    statistic = list(all_continuous() ~ "{median} ({p25}, {p75}) [{min}, {max}]"),
+    digits    = list(all_continuous() ~ 1),
+    missing   = "ifany"
+  ) %>%
+  add_p(pvalue_fun = ~ style_pvalue(.x, digits = 3)) %>%   # ← ここでp値の桁を統一
+  bold_labels()
+
+# 統計量（中央値[IQR] など）は pattern を使う
+stat_pat <- "{median} ({p25}, {p75})"
+
+age_no   <- inline_text(tbl1_by_resection, variable = "age",  column = "No",  pattern = stat_pat)
+age_yes  <- inline_text(tbl1_by_resection, variable = "age",  column = "Yes", pattern = stat_pat)
+
+bun_no   <- inline_text(tbl1_by_resection, variable = "bun",  column = "No",  pattern = stat_pat)
+bun_yes  <- inline_text(tbl1_by_resection, variable = "bun",  column = "Yes", pattern = stat_pat)
+
+tbil_no  <- inline_text(tbl1_by_resection, variable = "tbil", column = "No",  pattern = stat_pat)
+tbil_yes <- inline_text(tbl1_by_resection, variable = "tbil", column = "Yes", pattern = stat_pat)
+
+# p値は column="p.value" だけ（patternは指定しない）
+age_p  <- inline_text(tbl1_by_resection, variable = "age",  column = "p.value")
+bun_p  <- inline_text(tbl1_by_resection, variable = "bun",  column = "p.value")
+tbil_p <- inline_text(tbl1_by_resection, variable = "tbil", column = "p.value")
+
+# 文章の組み立て例
+cat(
+  "Patients who required bowel resection were older (", age_yes, " vs ", age_no,
+  ", p = ", age_p, ") and had higher BUN (", bun_yes, " vs ", bun_no,
+  ", p = ", bun_p, ") and T-bil (", tbil_yes, " vs ", tbil_no,
+  ", p = ", tbil_p, ").\n", sep = ""
+)
+
+```
+# Outcome data
+```{r}
+library(dplyr)
+library(gtsummary)
+
+# 選択する列名を安全に作る
+sel_vars <- intersect(names(ds_out), c(vars_bin, vars_cont))
+
+# もし何も選べない場合は警告して空データで続行
+if (length(sel_vars) == 0L) {
+  warning("No outcome variables found in ds_out; creating an empty table.")
+  tmp <- dplyr::tibble(.rows = nrow(ds_out))
+} else {
+  tmp <- dplyr::select(ds_out, tidyselect::all_of(sel_vars))
+}
+
+tbl_outcomes <-
+  tmp %>%
+  gtsummary::tbl_summary(
+    type = list(
+      gtsummary::all_categorical() ~ "categorical",
+      gtsummary::all_continuous()  ~ "continuous"
+    ),
+    statistic = list(
+      gtsummary::all_categorical() ~ "{n} ({p}%)",
+      gtsummary::all_continuous()  ~ "{median} ({p25}, {p75})"
+    ),
+    digits = list(gtsummary::all_continuous() ~ 1),
+    missing = "ifany",
+    label = list(
+      resection   ~ "Bowel resection (primary)",
+      death       ~ "In-hospital mortality",
+      reoperation ~ "Reoperation",
+      readmission ~ "Readmission",
+      opetime     ~ "Operative time, min",
+      bleeding    ~ "Bleeding, mL",
+      los_postop  ~ "Postoperative LOS, days"
+    )
+  ) |>
+  gtsummary::add_n() |>
+  gtsummary::bold_labels()
+tbl_outcomes
+
+```
+
+# Main analyses
+```{r}
+# ===== 文面用の数値を抽出して整形（追記コード） =====
+library(dplyr)
+
+# 小数とp値の整形ヘルパー
+fmt_num <- function(x, d = 2) sprintf(paste0("%.", d, "f"), x)
+fmt_pct <- function(x, d = 1) sprintf(paste0("%.", d, "f"), 100 * x)
+fmt_p   <- function(p) ifelse(is.na(p), "NA",
+                       ifelse(p < 0.001, "<0.001", sprintf("%.3f", p)))
+
+# ---------- BUN（10 mg/dLあたり）：aOR / aRR / aRD ----------
+df_adj_bun <- ds_base %>%
+  filter(!is.na(y), !is.na(bun10), !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+or_bun <- rqlm(y ~ bun10 + age + sex + hernia_type, binomial(), TRUE,  df_adj_bun) %>%
+  filter(term == "bun10")
+rr_bun <- rqlm(y ~ bun10 + age + sex + hernia_type, poisson(),  TRUE,  df_adj_bun) %>%
+  filter(term == "bun10")
+rd_bun <- rqlm(y ~ bun10 + age + sex + hernia_type, gaussian(), FALSE, df_adj_bun) %>%
+  filter(term == "bun10")
+
+aOR_bun  <- fmt_num(or_bun$estimate)
+aOR_lo   <- fmt_num(or_bun$conf.low)
+aOR_hi   <- fmt_num(or_bun$conf.high)
+aOR_p    <- fmt_p(or_bun$p.value)
+
+aRR_bun  <- fmt_num(rr_bun$estimate)
+aRR_lo   <- fmt_num(rr_bun$conf.low)
+aRR_hi   <- fmt_num(rr_bun$conf.high)
+
+aRD_bun  <- fmt_pct(rd_bun$estimate)   # %
+aRD_lo   <- fmt_pct(rd_bun$conf.low)   # %
+aRD_hi   <- fmt_pct(rd_bun$conf.high)  # %
+
+# ---------- T-bil（1 mg/dLあたり）：aOR ----------
+df_adj_tbil <- ds_base %>%
+  filter(!is.na(y), !is.na(tbil), !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+or_tbil <- rqlm(y ~ tbil + age + sex + hernia_type, binomial(), TRUE, df_adj_tbil) %>%
+  filter(term == "tbil")
+
+aOR_tbil <- fmt_num(or_tbil$estimate)
+aOR_t_lo <- fmt_num(or_tbil$conf.low)
+aOR_t_hi <- fmt_num(or_tbil$conf.high)
+aOR_t_p  <- fmt_p(or_tbil$p.value)
+
+# ===== ここを追記：T-bil の aRR / aRD を追加し、文面を完成 =====
+# T-bil の aRR / aRD を計算
+rr_tbil <- rqlm(y ~ tbil + age + sex + hernia_type, poisson(),  TRUE,  df_adj_tbil) |>
+  dplyr::filter(term == "tbil")
+rd_tbil <- rqlm(y ~ tbil + age + sex + hernia_type, gaussian(), FALSE, df_adj_tbil) |>
+  dplyr::filter(term == "tbil")
+
+aRR_tbil <- fmt_num(rr_tbil$estimate)
+aRR_t_lo <- fmt_num(rr_tbil$conf.low)
+aRR_t_hi <- fmt_num(rr_tbil$conf.high)
+
+aRD_tbil <- fmt_pct(rd_tbil$estimate)   # %
+aRD_t_lo <- fmt_pct(rd_tbil$conf.low)   # %
+aRD_t_hi <- fmt_pct(rd_tbil$conf.high)  # %
+
+# 文章（BUNは前回の sentence_bun を流用／再生成、T-bil も aRR/aRD を追加）
+sentence_bun <- paste0(
+  "After multivariable adjustment for patient age, sex, and hernia type, ",
+  "each 10 mg/dL increase in preoperative BUN was significantly associated ",
+  "with an increased risk of bowel resection (aOR ", aOR_bun, ", 95% CI ",
+  aOR_lo, "–", aOR_hi, ", p=", aOR_p, "; ",
+  "aRR ", aRR_bun, ", 95% CI ", aRR_lo, "–", aRR_hi, "; ",
+  "aRD ", aRD_bun, "%, 95% CI ", aRD_lo, "–", aRD_hi, "%)."
+)
+
+sentence_tbil <- paste0(
+  "In contrast, after the same multivariable adjustment, preoperative T-bil was ",
+  ifelse(or_tbil$p.value < 0.05, "" , "not "),
+  "significantly associated with the risk of bowel resection ",
+  "(aOR ", aOR_tbil, ", 95% CI ", aOR_t_lo, "–", aOR_t_hi, ", p=", aOR_t_p, "; ",
+  "aRR ", aRR_tbil, ", 95% CI ", aRR_t_lo, "–", aRR_t_hi, "; ",
+  "aRD ", aRD_tbil, "%, 95% CI ", aRD_t_lo, "–", aRD_t_hi, "%)."
+)
+
+cat(sentence_bun, "\n")
+cat(sentence_tbil, "\n")
+
+
+
+```
+# Table2
+```{r}
+# ===== Table 2 を整形して出力（T-bil と BUN の2枚） =====
+if (!requireNamespace("gt", quietly = TRUE)) install.packages("gt")
+library(gt)
+
+# 計算（未作成なら作る）
+table_tbil <- if (exists("table_tbil")) table_tbil else build_table("tbil")
+table_bun  <- if (exists("table_bun"))  table_bun  else build_table("bun10")
+
+gt_tbil <-
+  table_tbil |>
+  gt() |>
+  tab_header(
+    title = md("**Table 2A. Crude and adjusted associations (T-bil model)**"),
+    subtitle = md("Odds Ratios (OR), Risk Ratios (RR), and Risk Differences (RD)")
+  ) |>
+  opt_table_outline() |>
+  cols_label(
+    Variable = "Variable",
+    Value    = "Value",
+    `Crude OR (95% CI)`     = "Crude OR (95% CI)",
+    `Adjusted OR (95% CI)`  = "Adjusted OR (95% CI)",
+    `Crude RR (95% CI)`     = "Crude RR (95% CI)",
+    `Adjusted RR (95% CI)`  = "Adjusted RR (95% CI)",
+    `Crude RD% (95% CI)`    = "Crude RD% (95% CI)",
+    `Adjusted RD% (95% CI)` = "Adjusted RD% (95% CI)"
+  )
+
+gt_bun <-
+  table_bun |>
+  gt() |>
+  tab_header(
+    title = md("**Table 2B. Crude and adjusted associations (BUN model)**"),
+    subtitle = md("Odds Ratios (OR), Risk Ratios (RR), and Risk Differences (RD)")
+  ) |>
+  opt_table_outline() |>
+  cols_label(
+    Variable = "Variable",
+    Value    = "Value",
+    `Crude OR (95% CI)`     = "Crude OR (95% CI)",
+    `Adjusted OR (95% CI)`  = "Adjusted OR (95% CI)",
+    `Crude RR (95% CI)`     = "Crude RR (95% CI)",
+    `Adjusted RR (95% CI)`  = "Adjusted RR (95% CI)",
+    `Crude RD% (95% CI)`    = "Crude RD% (95% CI)",
+    `Adjusted RD% (95% CI)` = "Adjusted RD% (95% CI)"
+  )
+
+# 表示（Rmdならそのままレンダリングされます）
+gt_tbil
+gt_bun
+
+# 必要なら保存
+# gtsave(gt_tbil, "table2A_tbil.html"); gtsave(gt_bun, "table2B_bun.html")
+# gtsave(gt_tbil, "table2A_tbil.png");  gtsave(gt_bun,  "table2B_bun.png")
+
+```
+
+# RCS
+```{r}
+# ===== RCS記述の検証＆文章生成（追記用） =====
+if (!requireNamespace("tibble", quietly = TRUE)) install.packages("tibble")
+if (!requireNamespace("dplyr",  quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("gt",     quietly = TRUE)) install.packages("gt")
+library(dplyr); library(tibble); library(gt)
+
+# 1) 取り出し＆サマリー表
+rcs_df <- bind_rows(
+  tibble(
+    marker     = "BUN",
+    n_used     = res_bun$n_used,
+    events     = res_bun$n_events,
+    ref_value  = res_bun$ref_value,
+    lrt_p      = res_bun$lrt_p,
+    AIC_linear = unname(res_bun$AIC["linear"]),
+    AIC_rcs    = unname(res_bun$AIC["rcs"]),
+    delta_AIC  = unname(res_bun$AIC["linear"] - res_bun$AIC["rcs"]),
+    threshold  = res_bun$threshold
+  ),
+  tibble(
+    marker     = "T-bil",
+    n_used     = res_tbil$n_used,
+    events     = res_tbil$n_events,
+    ref_value  = res_tbil$ref_value,
+    lrt_p      = res_tbil$lrt_p,
+    AIC_linear = unname(res_tbil$AIC["linear"]),
+    AIC_rcs    = unname(res_tbil$AIC["rcs"]),
+    delta_AIC  = unname(res_tbil$AIC["linear"] - res_tbil$AIC["rcs"]),
+    threshold  = res_tbil$threshold
+  )
+) %>%
+  mutate(
+    lrt_p_fmt     = formatC(lrt_p, format = "fg", digits = 3),
+    AIC_linear_fmt= sprintf("%.1f", AIC_linear),
+    AIC_rcs_fmt   = sprintf("%.1f", AIC_rcs),
+    delta_AIC_fmt = sprintf("%.1f", delta_AIC),
+    ref_fmt       = signif(ref_value, 3),
+    thr_fmt       = ifelse(is.na(threshold), "NA", signif(threshold, 3))
+  )
+
+# 2) あなたの文中の“想定値”に対する近似チェック（閾値やAICが概ね合っているか）
+#    ※ 実データが変わると値も変動するので、少し広めの許容幅を設定
+near <- function(x, target, tol = 0.6) {  # tol は必要に応じて調整
+  if (is.na(x) || is.na(target)) return(FALSE)
+  abs(x - target) <= tol
+}
+
+targets <- list(
+  BUN  = list(p = 0.001, AIC_lin = 100.8, AIC_rcs = 91.2, thr = 18.0, ref = 17.9),
+  Tbil = list(p = 0.40,  AIC_lin =  89.6, AIC_rcs = 91.8, thr = NA,   ref = 1.0)
+)
+
+check_msgs <- list(
+  BUN = c(
+    paste0("BUN: LRT p≈0.001 ?  -> ", rcs_df$lrt_p[rcs_df$marker=="BUN"], 
+           ifelse(rcs_df$lrt_p[rcs_df$marker=="BUN"] < 0.05, " [significant]", " [ns]")),
+    paste0("BUN: AIC(linear)≈100.8 ? -> ", rcs_df$AIC_linear_fmt[rcs_df$marker=="BUN"],
+           ifelse(near(rcs_df$AIC_linear[rcs_df$marker=="BUN"], targets$BUN$AIC_lin, tol=0.8)," [ok]"," [diff]")),
+    paste0("BUN: AIC(RCS)≈91.2 ?     -> ", rcs_df$AIC_rcs_fmt[rcs_df$marker=="BUN"],
+           ifelse(near(rcs_df$AIC_rcs[rcs_df$marker=="BUN"], targets$BUN$AIC_rcs, tol=0.8)," [ok]"," [diff]")),
+    paste0("BUN: threshold≈18 mg/dL? -> ", rcs_df$thr_fmt[rcs_df$marker=="BUN"],
+           ifelse(near(rcs_df$threshold[rcs_df$marker=="BUN"], targets$BUN$thr, tol=2.0)," [ok]"," [diff]")),
+    paste0("BUN: ref≈17.9 mg/dL ?   -> ", rcs_df$ref_fmt[rcs_df$marker=="BUN"])
+  ),
+  Tbil = c(
+    paste0("T-bil: LRT p≈0.40 ?     -> ", rcs_df$lrt_p[rcs_df$marker=="T-bil"],
+           ifelse(rcs_df$lrt_p[rcs_df$marker=="T-bil"] >= 0.05, " [ns]", " [sig]")),
+    paste0("T-bil: AIC(linear)≈89.6? -> ", rcs_df$AIC_linear_fmt[rcs_df$marker=="T-bil"]),
+    paste0("T-bil: AIC(RCS)≈91.8?    -> ", rcs_df$AIC_rcs_fmt[rcs_df$marker=="T-bil"]),
+    paste0("T-bil: ref=1.0 mg/dL ?   -> ", rcs_df$ref_fmt[rcs_df$marker=="T-bil"])
+  )
+)
+
+cat(paste(check_msgs$BUN,  collapse = "\n"), "\n")
+cat(paste(check_msgs$Tbil, collapse = "\n"), "\n")
+
+# 3) 論文本文にそのまま使える1段落の自動生成
+bun_txt <- with(rcs_df %>% filter(marker=="BUN"),
+  paste0(
+    "The analysis revealed a significant non-linear association between preoperative BUN and the odds of bowel resection ",
+    "(p = ", lrt_p_fmt, " for non-linearity test). ",
+    "The RCS model provided a better fit than the linear model (AIC ",
+    AIC_rcs_fmt, " vs ", AIC_linear_fmt, ", ΔAIC=", delta_AIC_fmt, "). ",
+    "As shown in Figure 3, the risk began to increase around BUN ≈ ", thr_fmt, " mg/dL, ",
+    "where the lower bound of the 95% CI first exceeded an OR of 1.0. ",
+    "The reference value was BUN = ", ref_fmt, " mg/dL."
+  )
+)
+
+tbil_txt <- with(rcs_df %>% filter(marker=="T-bil"),
+  paste0(
+    "In contrast, there was no statistical evidence of a non-linear relationship for preoperative T-bil ",
+    "(p = ", lrt_p_fmt, " for non-linearity test), suggesting the association can be approximated as linear. ",
+    "The reference value was T-bil = ", ref_fmt, " mg/dL."
+  )
+)
+
+cat(bun_txt,  "\n")
+cat(tbil_txt, "\n")
+
+# 4) （任意）確認用のミニ表（Rmdなら綺麗に出ます）
+rcs_df %>%
+  transmute(
+    Marker = marker,
+    N = n_used, Events = events,
+    `Ref` = ref_fmt,
+    `LRT p` = lrt_p_fmt,
+    `AIC linear` = AIC_linear_fmt,
+    `AIC RCS` = AIC_rcs_fmt,
+    `ΔAIC` = delta_AIC_fmt,
+    `Threshold (mg/dL)` = thr_fmt
+  ) %>%
+  gt() %>%
+  tab_header(title = md("**RCS model diagnostics (verification)**"))
+
+```
+
+# サブグループ解析
+```{r}
+# ================================
+# Subgroup analyses by hernia type
+#  - 調整：age, sex（Female基準）
+#  - 主要曝露：BUN（10 mg/dLあたり）/ T-bil（1 mg/dLあたり）
+#  - 交互作用の検定（p for interaction）
+#  - サブグループ別 調整OR（森林プロット＆補足表）
+# ================================
+if (!requireNamespace("dplyr", quietly = TRUE))      install.packages("dplyr")
+if (!requireNamespace("broom", quietly = TRUE))      install.packages("broom")
+if (!requireNamespace("broom.helpers", quietly = TRUE)) install.packages("broom.helpers")
+if (!requireNamespace("ggplot2", quietly = TRUE))    install.packages("ggplot2")
+if (!requireNamespace("gtsummary", quietly = TRUE))  install.packages("gtsummary")
+if (!requireNamespace("stringr", quietly = TRUE))    install.packages("stringr")
+
+library(dplyr)
+library(broom)
+library(broom.helpers)
+library(ggplot2)
+library(gtsummary)
+library(stringr)
+
+# ---- 0) 解析データの共通整形 ----
+ds_sub <- ds09 %>%
+  mutate(
+    y           = {v <- resection; if (is.factor(v)) v <- as.character(v); v <- suppressWarnings(as.numeric(v)); ifelse(v %in% c(0,1), v, NA_real_)},
+    age         = suppressWarnings(as.numeric(age)),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    bun10       = bun/10,  # 10 mg/dLあたり
+    sex         = factor(sex, levels = c("Female","Male")),
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator"))
+  )
+
+# 完全ケース（曝露ごとに作成）
+dat_bun  <- ds_sub %>% filter(!is.na(y), !is.na(bun10), !is.na(age), !is.na(sex), !is.na(hernia_type))
+dat_tbil <- ds_sub %>% filter(!is.na(y), !is.na(tbil),  !is.na(age), !is.na(sex), !is.na(hernia_type))
+
+# ---- 1) 交互作用の検定（BUN×hernia_type, T-bil×hernia_type） ----
+fit_bun_main <- glm(y ~ bun10 + age + sex + hernia_type, family = binomial(), data = dat_bun)
+fit_bun_int  <- glm(y ~ bun10*hernia_type + age + sex,   family = binomial(), data = dat_bun)
+lrt_bun      <- anova(fit_bun_main, fit_bun_int, test = "LRT")
+p_int_bun    <- tryCatch(lrt_bun[["Pr(>Chi)"]][2], error = function(e) NA_real_)
+
+fit_tbil_main <- glm(y ~ tbil + age + sex + hernia_type, family = binomial(), data = dat_tbil)
+fit_tbil_int  <- glm(y ~ tbil*hernia_type + age + sex,   family = binomial(), data = dat_tbil)
+lrt_tbil      <- anova(fit_tbil_main, fit_tbil_int, test = "LRT")
+p_int_tbil    <- tryCatch(lrt_tbil[["Pr(>Chi)"]][2], error = function(e) NA_real_)
+
+cat(sprintf("p for interaction (BUN × hernia_type) = %.3g\n", p_int_bun))
+cat(sprintf("p for interaction (T-bil × hernia_type) = %.3g\n", p_int_tbil))
+
+# ---- 2) サブグループ別（型で層別）に調整ORを算出：BUN（10 mg/dL） ----
+get_or_by_stratum <- function(df, exposure, exp_label) {
+  levs <- levels(df$hernia_type)
+  out <- lapply(levs, function(L){
+    dd <- df %>% filter(hernia_type == L)
+    if (nrow(dd) < 10 || length(unique(dd$y)) < 2) return(NULL)  # 安全策
+    fit <- glm(stats::as.formula(paste0("y ~ ", exposure, " + age + sex")),
+               family = binomial(), data = dd)
+    tid <- broom::tidy(fit, conf.int = TRUE, exponentiate = TRUE)
+    est <- tid %>% filter(term == exposure) %>%
+      transmute(
+        hernia_type = L,
+        term = exposure,
+        estimate = estimate,
+        conf.low = conf.low,
+        conf.high = conf.high,
+        p.value = p.value,
+        n = nobs(fit),
+        events = sum(dd$y == 1, na.rm = TRUE)
+      )
+    est
+  })
+  bind_rows(out) %>% mutate(exposure = exp_label)
+}
+
+or_bun_bytype  <- get_or_by_stratum(dat_bun,  "bun10", "BUN (per 10 mg/dL)")
+or_tbil_bytype <- get_or_by_stratum(dat_tbil, "tbil",  "T-bil (per 1 mg/dL)")
+
+# 確認
+or_bun_bytype
+or_tbil_bytype
+
+# ---- 3) フォレストプロット（補足図用：S1） ----
+make_forest <- function(df, title){
+  df %>%
+    mutate(
+      label = sprintf("aOR %.2f (%.2f–%.2f)", estimate, conf.low, conf.high),
+      hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator"))
+    ) %>%
+    ggplot(aes(x = hernia_type, y = estimate)) +
+    geom_hline(yintercept = 1, linetype = 2) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.15) +
+    coord_flip() +
+    labs(x = NULL, y = "Adjusted OR", title = title) +
+    theme_minimal(base_size = 12)
+}
+
+p_forest_bun  <- make_forest(or_bun_bytype,  "BUN (per 10 mg/dL) and Resection by Hernia Type")
+p_forest_tbil <- make_forest(or_tbil_bytype, "T-bil (per 1 mg/dL) and Resection by Hernia Type")
+
+print(p_forest_bun)
+print(p_forest_tbil)
+
+# ---- 4) gtsummary で“層別の補足表”（S3）を一発作成 ----
+library(purrr)
+
+# BUN
+bun_fit_tbls <- dat_bun |>
+  dplyr::group_split(hernia_type, .keep = TRUE) |>
+  map(~ gtsummary::tbl_regression(
+    glm(y ~ bun10 + age + sex, family = binomial(), data = .x),
+    exponentiate = TRUE,
+    label = list(bun10 ~ "BUN (per 10 mg/dL)", age ~ "Age (per year)", sex ~ "Sex (Male vs Female)")
+  ))
+bun_strata_labels <- levels(dat_bun$hernia_type)
+tbl_bun_strata_fallback <- gtsummary::tbl_stack(
+  bun_fit_tbls,
+  group_header = bun_strata_labels
+)
+
+# T-bil
+tbil_fit_tbls <- dat_tbil |>
+  dplyr::group_split(hernia_type, .keep = TRUE) |>
+  map(~ gtsummary::tbl_regression(
+    glm(y ~ tbil + age + sex, family = binomial(), data = .x),
+    exponentiate = TRUE,
+    label = list(tbil ~ "T-bil (per 1 mg/dL)", age ~ "Age (per year)", sex ~ "Sex (Male vs Female)")
+  ))
+tbl_tbil_strata_fallback <- gtsummary::tbl_stack(
+  tbil_fit_tbls,
+  group_header = bun_strata_labels
+)
+
+tbl_bun_strata_fallback
+tbl_tbil_strata_fallback
+
+
+# ---- 5) “本文埋め込み用テキスト”を自動生成（任意） ----
+fmt_p <- function(p, digits = 3) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  formatC(p, format = "f", digits = digits)
+}
+txt_bun_int  <- paste0("p for interaction (BUN × hernia type) = ", fmt_p(p_int_bun))
+txt_tbil_int <- paste0("p for interaction (T-bil × hernia type) = ", fmt_p(p_int_tbil))
+cat(txt_bun_int, "\n", txt_tbil_int, "\n")
+
+# 層別aOR（BUNとT-bil）を一行で
+summ_line <- function(df, exposure_label){
+  df %>%
+    mutate(part = paste0(hernia_type, ": aOR ", sprintf("%.2f", estimate),
+                         " (", sprintf("%.2f", conf.low), "–", sprintf("%.2f", conf.high), ")")) %>%
+    arrange(hernia_type) %>%
+    pull(part) %>%
+    paste(collapse = "; ") %>%
+    paste0(exposure_label, " | ", .)
+}
+cat(summ_line(or_bun_bytype,  "BUN"),  "\n")
+cat(summ_line(or_tbil_bytype, "T-bil"), "\n")
+
+```
+
+# Sensitivity analyses
+```{r}
+# ===== 共通データ整形（0/1, 連続, 参照カテゴリ） =====
+ds_sa <- ds09 %>%
+  dplyr::mutate(
+    # outcomes
+    resection   = as.numeric(as.character(resection)),
+    reoperation = as.numeric(as.character(reoperation)),
+    readmission = as.numeric(as.character(readmission)),
+    los_postop  = suppressWarnings(as.numeric(los_postop)),
+    # exposures
+    bun   = suppressWarnings(as.numeric(bun)),
+    tbil  = suppressWarnings(as.numeric(tbil)),
+    bun10 = bun/10,
+    # covariates
+    age         = suppressWarnings(as.numeric(age)),
+    sex         = factor(sex, levels = c("Female","Male")), # ref=Female
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator")) # ref=Inguinal
+  )
+
+# ヘルパー：ロバストGLM（OR/RR/RDを tidy で返す）
+rqlm <- function(formula, family, eform = FALSE, data) {
+  fit <- glm(formula, family = family, data = data)
+  V   <- sandwich::vcovHC(fit, type = "HC0")
+  ct  <- lmtest::coeftest(fit, vcov. = V)
+  est <- ct[,1]; se <- ct[,2]; p <- ct[,4]
+  lo  <- est - 1.96*se; hi <- est + 1.96*se
+  if (isTRUE(eform)) { est <- exp(est); lo <- exp(lo); hi <- exp(hi) }
+  tibble::tibble(term = rownames(ct), estimate = as.numeric(est),
+                 conf.low = as.numeric(lo), conf.high = as.numeric(hi),
+                 p.value = as.numeric(p))
+}
+
+# ヘルパー：二値アウトカムに対して aOR/aRR/aRD を一括で
+fit_bin_outcome <- function(y, x, data = ds_sa) {
+  df <- data %>% dplyr::filter(!is.na(.data[[y]]), !is.na(.data[[x]]),
+                               !is.na(age), !is.na(sex), !is.na(hernia_type))
+  fmla <- as.formula(sprintf("%s ~ %s + age + sex + hernia_type", y, x))
+  list(
+    aOR = rqlm(fmla, binomial(), TRUE,  df) %>% dplyr::filter(term == x),
+    aRR = rqlm(fmla, poisson(),  TRUE,  df) %>% dplyr::filter(term == x),
+    aRD = rqlm(fmla, gaussian(), FALSE, df) %>% dplyr::filter(term == x),
+    n   = nrow(df),
+    ev  = sum(df[[y]] == 1, na.rm = TRUE)
+  )
+}
+
+# ---- 他アウトカムの効果推定（BUN/T-bil） ----
+outs_bin <- c("reoperation","readmission")   # 二値アウトカム
+sens_list <- list()
+
+for (y in outs_bin) {
+  sens_list[[paste0(y,"_bun10")]] <- fit_bin_outcome(y, "bun10")
+  sens_list[[paste0(y,"_tbil")]]  <- fit_bin_outcome(y, "tbil")
+}
+
+# 連続アウトカム：術後在院日数（右裾の重い分布を想定→log(LOS+1)で線形回帰）
+fit_los <- function(x, data = ds_sa) {
+  df <- data %>% dplyr::filter(!is.na(los_postop), !is.na(.data[[x]]),
+                               !is.na(age), !is.na(sex), !is.na(hernia_type))
+  fmla <- as.formula(sprintf("log1p(los_postop) ~ %s + age + sex + hernia_type", x))
+  fit  <- lm(fmla, data = df)
+  V    <- sandwich::vcovHC(fit, type = "HC0")
+  ct   <- lmtest::coeftest(fit, vcov. = V)
+  est  <- tibble::tibble(
+    term = rownames(ct),
+    estimate = ct[,1], conf.low = ct[,1]-1.96*ct[,2], conf.high = ct[,1]+1.96*ct[,2],
+    p.value = ct[,4]
+  ) %>% dplyr::filter(term == x) %>%
+      dplyr::mutate( # 解釈用：%差（近似）
+        pct_diff = (exp(estimate)-1)*100,
+        pct_lo   = (exp(conf.low)-1)*100,
+        pct_hi   = (exp(conf.high)-1)*100
+      )
+  list(res = est, n = nrow(df))
+}
+
+sens_list[["los_bun10"]] <- fit_los("bun10")
+sens_list[["los_tbil" ]] <- fit_los("tbil")
+
+# ---- Supplementary Table S4 用の要約テーブル（見出しはお好みで） ----
+tab_S4 <- dplyr::bind_rows(
+  tibble::tibble(
+    outcome = "Reoperation", exposure = "BUN (per 10 mg/dL)",
+    model = c("aOR","aRR","aRD"),
+    est = c(sens_list$reoperation_bun10$aOR$estimate,
+            sens_list$reoperation_bun10$aRR$estimate,
+            100*sens_list$reoperation_bun10$aRD$estimate),
+    lo  = c(sens_list$reoperation_bun10$aOR$conf.low,
+            sens_list$reoperation_bun10$aRR$conf.low,
+            100*sens_list$reoperation_bun10$aRD$conf.low),
+    hi  = c(sens_list$reoperation_bun10$aOR$conf.high,
+            sens_list$reoperation_bun10$aRR$conf.high,
+            100*sens_list$reoperation_bun10$aRD$conf.high),
+    p   = c(sens_list$reoperation_bun10$aOR$p.value,
+            sens_list$reoperation_bun10$aRR$p.value,
+            sens_list$reoperation_bun10$aRD$p.value)
+  ),
+  tibble::tibble(
+    outcome = "Reoperation", exposure = "T-bil (per 1 mg/dL)",
+    model = c("aOR","aRR","aRD"),
+    est = c(sens_list$reoperation_tbil$aOR$estimate,
+            sens_list$reoperation_tbil$aRR$estimate,
+            100*sens_list$reoperation_tbil$aRD$estimate),
+    lo  = c(sens_list$reoperation_tbil$aOR$conf.low,
+            sens_list$reoperation_tbil$aRR$conf.low,
+            100*sens_list$reoperation_tbil$aRD$conf.low),
+    hi  = c(sens_list$reoperation_tbil$aOR$conf.high,
+            sens_list$reoperation_tbil$aRR$conf.high,
+            100*sens_list$reoperation_tbil$aRD$conf.high),
+    p   = c(sens_list$reoperation_tbil$aOR$p.value,
+            sens_list$reoperation_tbil$aRR$p.value,
+            sens_list$reoperation_tbil$aRD$p.value)
+  ),
+  tibble::tibble(
+    outcome = "Readmission", exposure = "BUN (per 10 mg/dL)",
+    model = c("aOR","aRR","aRD"),
+    est = c(sens_list$readmission_bun10$aOR$estimate,
+            sens_list$readmission_bun10$aRR$estimate,
+            100*sens_list$readmission_bun10$aRD$estimate),
+    lo  = c(sens_list$readmission_bun10$aOR$conf.low,
+            sens_list$readmission_bun10$aRR$conf.low,
+            100*sens_list$readmission_bun10$aRD$conf.low),
+    hi  = c(sens_list$readmission_bun10$aOR$conf.high,
+            sens_list$readmission_bun10$aRR$conf.high,
+            100*sens_list$readmission_bun10$aRD$conf.high),
+    p   = c(sens_list$readmission_bun10$aOR$p.value,
+            sens_list$readmission_bun10$aRR$p.value,
+            sens_list$readmission_bun10$aRD$p.value)
+  ),
+  tibble::tibble(
+    outcome = "Readmission", exposure = "T-bil (per 1 mg/dL)",
+    model = c("aOR","aRR","aRD"),
+    est = c(sens_list$readmission_tbil$aOR$estimate,
+            sens_list$readmission_tbil$aRR$estimate,
+            100*sens_list$readmission_tbil$aRD$estimate),
+    lo  = c(sens_list$readmission_tbil$aOR$conf.low,
+            sens_list$readmission_tbil$aRR$conf.low,
+            100*sens_list$readmission_tbil$aRD$conf.low),
+    hi  = c(sens_list$readmission_tbil$aOR$conf.high,
+            sens_list$readmission_tbil$aRR$conf.high,
+            100*sens_list$readmission_tbil$aRD$conf.high),
+    p   = c(sens_list$readmission_tbil$aOR$p.value,
+            sens_list$readmission_tbil$aRR$p.value,
+            sens_list$readmission_tbil$aRD$p.value)
+  ),
+  tibble::tibble(
+    outcome = "Postop LOS (days, log-link)",
+    exposure = "BUN (per 10 mg/dL)",
+    model = "β (log-days)",
+    est = sens_list$los_bun10$res$estimate,
+    lo  = sens_list$los_bun10$res$conf.low,
+    hi  = sens_list$los_bun10$res$conf.high,
+    p   = sens_list$los_bun10$res$p.value
+  ) %>% dplyr::bind_rows(
+    tibble::tibble(
+      outcome = "Postop LOS (days, log-link)",
+      exposure = "T-bil (per 1 mg/dL)",
+      model = "β (log-days)",
+      est = sens_list$los_tbil$res$estimate,
+      lo  = sens_list$los_tbil$res$conf.low,
+      hi  = sens_list$los_tbil$res$conf.high,
+      p   = sens_list$los_tbil$res$p.value
+    )
+  )
+)
+
+# 必要パッケージ
+library(dplyr)
+library(scales)  # p値の整形に使用
+library(gt)      # gtで体裁を整える場合
+library(knitr)   # kableを使う場合
+
+library(dplyr)
+library(scales)
+
+# ---- 表示用に整形（tab_S4 → tab_S4_disp） ----
+tab_S4_disp <- tab_S4 %>%
+  dplyr::mutate(
+    estimate_CI = dplyr::case_when(
+      grepl("RD", model,  fixed = TRUE) ~ sprintf("%.1f%% (%.1f, %.1f)", est, lo, hi), # RDは％
+      grepl("β",  model,  fixed = TRUE) ~ sprintf("%.3f (%.3f, %.3f)",   est, lo, hi), # 連続
+      TRUE                               ~ sprintf("%.2f (%.2f, %.2f)",   est, lo, hi)  # OR/RR
+    ),
+    p = scales::pvalue(p, accuracy = 0.001)
+  ) %>%
+  dplyr::select(outcome, exposure, model, estimate_CI, p) %>%
+  dplyr::arrange(outcome, exposure, model)
+
+# 表示（どちらか）
+# 1) gt で体裁
+# library(gt)
+# tab_S4_disp %>%
+#   gt(groupname_col = "outcome") %>%
+#   cols_label(exposure="Exposure", model="Model", estimate_CI="Estimate (95% CI)", p="p-value") %>%
+#   tab_header(title = md("**Supplementary Table S4. Sensitivity Analyses**"))
+
+# 2) シンプルに kable
+knitr::kable(tab_S4_disp, caption = "Supplementary Table S4. Sensitivity Analyses")
+
+
+
+
+
+```
+
+```{r}
+# 必要パッケージ
+need <- c("tidyverse","gtsummary","gt","DiagrammeR","patchwork","scales","broom",
+          "sandwich","lmtest","viridisLite")
+for(p in need) if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+lapply(need, library, character.only = TRUE)
+
+# 表の保存ヘルパー（gt/gtsummary両対応）
+save_gt <- function(x, file, width = 1200){
+  if (inherits(x, "gtsummary")) x <- gtsummary::as_gt(x)
+  gtsave::gtsave(x, filename = file, path = ".", vwidth = width, vheight = NULL)
+}
+
+# Okabe–Ito（色覚多様性に配慮）を“少し淡く”使うスケール
+okabe_pastel <- function(n){
+  base <- c("#000000","#E69F00","#56B4E9","#009E73",
+            "#F0E442","#0072B2","#D55E00","#CC79A7")
+  pal <- rep(base, length.out = n)
+  scales::alpha(pal, 0.75)
+}
+
+```
+
+```{r}
+## --- 件数の計算（既存オブジェクトがあればそれを利用） ---
+n_screened <- if (exists("ds04")) nrow(ds04) else if (exists("ds03")) nrow(ds03) else nrow(ds09)
+
+# 待機/非観血整復を除外
+if (!exists("n_excl_elective_nonop")) {
+  if (exists("ds04") && "elective" %in% names(ds04)) {
+    n_excl_elective_nonop <- sum(ds04$elective != 1L | is.na(ds04$elective))
+  } else n_excl_elective_nonop <- 0L
+}
+
+# 対象外ヘルニア型（keepリスト外）
+if (!exists("n_excl_non_target")) {
+  if (exists("ds00") && exists("ds03")) n_excl_non_target <- nrow(ds00) - nrow(ds03) else n_excl_non_target <- 0L
+}
+
+# 小児
+if (!exists("n_excl_pediatric")) {
+  src <- if (exists("ds04")) ds04 else ds09
+  n_excl_pediatric <- sum(suppressWarnings(as.numeric(src$age)) < 18, na.rm = TRUE)
+}
+
+# 重複（同一入院の2回目以降）
+if (!exists("n_excl_duplicate")) {
+  n_excl_duplicate <- 0L
+  if (exists("ds04") && "first_op_in_adm" %in% names(ds04)) {
+    keep <- ds04$first_op_in_adm == 1
+    n_excl_duplicate <- sum(!keep & !is.na(keep))
+  }
+}
+
+# 必須欠測（resection, age, sex, hernia_type, bun, tbil）
+df_need <- ds09 %>%
+  mutate(
+    age = suppressWarnings(as.numeric(age)),
+    bun = suppressWarnings(as.numeric(bun)),
+    tbil = suppressWarnings(as.numeric(tbil)),
+    y = suppressWarnings(as.numeric(as.character(resection)))
+  )
+n_excl_missing <- sum(
+  is.na(df_need$y) | is.na(df_need$age) | is.na(df_need$sex) |
+    is.na(df_need$hernia_type) | (is.na(df_need$bun) & is.na(df_need$tbil))
+)
+
+# 最終解析対象
+final_included <- nrow(df_need) - (n_excl_elective_nonop + n_excl_non_target +
+                   n_excl_pediatric + n_excl_duplicate + n_excl_missing)
+
+# RCS/主解析に使えた完全症例数（参考）
+N_bun_complete  <- sum(!is.na(df_need$y) & !is.na(df_need$bun) &
+                       !is.na(df_need$age) & !is.na(df_need$sex) & !is.na(df_need$hernia_type))
+N_tbil_complete <- sum(!is.na(df_need$y) & !is.na(df_need$tbil) &
+                       !is.na(df_need$age) & !is.na(df_need$sex) & !is.na(df_need$hernia_type))
+
+## --- 図（DiagrammeR） ---
+DiagrammeR::grViz(sprintf("
+digraph flow {
+  graph [ranksep=0.35, nodesep=0.25, fontsize=12]
+  node [shape=box, style=rounded, fontname=Helvetica, width=3]
+  edge [arrowhead=vee]
+
+  A [label='Screened emergency groin hernias\\n(n = %d)'];
+  B [label='Excluded: elective / non-operative\\n(n = %d)'];
+  C [label='Excluded: non-target types\\n(n = %d)'];
+  D [label='Excluded: pediatric (<18y)\\n(n = %d)'];
+  E [label='Excluded: duplicates (same admission)\\n(n = %d)'];
+  F [label='Excluded: missing essentials\\n(n = %d)'];
+  G [label='Included in primary analysis\\n(n = %d)'];
+  H [label='Complete cases\\nBUN models: n = %d\\nT-bil models: n = %d', width=3.5];
+
+  A -> B -> C -> D -> E -> F -> G -> H;
+}
+", n_screened, n_excl_elective_nonop, n_excl_non_target, n_excl_pediatric,
+   n_excl_duplicate, n_excl_missing, final_included, N_bun_complete, N_tbil_complete))
+
+```
+
+```{r}
+# 表に入れない列（あなたの定義を流用）
+drop_vars <- c(
+  "id","ope_day","diagnose_pre","hight","weight","smoke","elective",
+  "operation_pre","operation_post","surgeon","outcome","dis_date","order_num",
+  "operationno","ad_date","ad_time","drain","hougou","fungou","reoperation",
+  "postop_head_ct","postop_head_mri","postop_abd_ct","consultation","postop_ekg",
+  "postop_us","postop_tv","urine_obs","postop_ext_us","op_seq","first_op",
+  "reop_this","adm_op_seq","first_op_in_adm","reop_in_adm","abx",
+  "readmission_date","death_date","dx_clean","hougou_flag","operation_post_norm",
+  "obturator","femoral","op_text"   # resection は by で使うので除外しない
+)
+
+# dplyr の select と mutate を明示的に使う
+cols_to_drop <- intersect(names(ds09), drop_vars)
+ds_tbl1 <- ds09 %>%
+  dplyr::select(-tidyselect::any_of(cols_to_drop)) %>%
+  dplyr::mutate(dplyr::across(where(is.character), factor))
+
+
+
+# 0/1をfactor化
+bin_cols <- names(ds_tbl1)[sapply(ds_tbl1, function(x) is.numeric(x) && all(na.omit(x) %in% c(0,1)))]
+if (length(bin_cols)) ds_tbl1 <- ds_tbl1 %>% mutate(across(all_of(bin_cols), ~factor(., levels = c(0,1))))
+
+# 表
+# Date型の列名を自動で抽出して落とす
+date_cols <- names(ds_tbl1)[sapply(ds_tbl1, inherits, what = "Date")]
+ds_tbl1_nodate <- ds_tbl1 %>% dplyr::select(-tidyselect::all_of(date_cols))
+
+# 連続は中央値(IQR)、群間比較つきのTable 1
+cont_stat <- "{median} ({p25}, {p75})"
+
+tbl1_by_resection <- ds_tbl1_nodate %>%
+  gtsummary::tbl_summary(
+    by        = resection,
+    type      = list(all_continuous() ~ "continuous"),
+    statistic = list(all_continuous() ~ cont_stat),
+    digits    = list(all_continuous() ~ 1),
+    missing   = "ifany"
+  ) %>%
+  gtsummary::add_n() %>%
+  gtsummary::add_p(test.args = all_continuous() ~ list(exact = FALSE)) %>%
+  gtsummary::bold_labels()
+
+
+tbl1_by_resection
+# 保存例: save_gt(tbl1_by_resection, "Table1_baseline.html")
+
+```
+
+
+
+
+```{r}
+ds_plot <- ds09 %>%
+  transmute(
+    bun  = suppressWarnings(as.numeric(bun)),
+    tbil = suppressWarnings(as.numeric(tbil)),
+    resection = factor(as.numeric(as.character(resection)), levels = c(0,1), labels = c("No","Yes")),
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator"))
+  )
+
+make_violin <- function(df, xvar, xlab){
+  ggplot(df, aes(x = .data[[xvar]], y = resection)) +
+    geom_violin(fill = "grey92", color = "grey50", scale = "width", trim = TRUE, orientation = "y") +
+    geom_point(aes(color = hernia_type),
+               position = position_jitter(height = 0.06, width = 0),
+               size = 1.8, alpha = 0.85) +
+    scale_color_manual(values = setNames(okabe_pastel(3), levels(df$hernia_type))) +
+    scale_y_discrete(limits = c("Yes","No")) +
+    labs(x = xlab, y = "Bowel resection", color = "Hernia type") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(face = "bold"))
+}
+
+p_bun  <- make_violin(filter(ds_plot, !is.na(bun)),  "bun",  "BUN (mg/dL)")
+p_tbil <- make_violin(filter(ds_plot, !is.na(tbil)), "tbil", "T-bil (mg/dL)")
+
+p_bun + p_tbil  # ← Figure 2
+ggsave("Figure2_violin.png", p_bun + p_tbil, width = 10, height = 4, dpi = 300)
+
+```
+
+
+```{r}
+# 依存パッケージ
+if (!requireNamespace("svglite", quietly = TRUE)) install.packages("svglite")
+
+# 例: バイオリン図やRCS図など
+svglite::svglite("fig_violin_bun.svg", width = 6, height = 4); print(p_bun); dev.off()
+svglite::svglite("fig_violin_tbil.svg", width = 6, height = 4); print(p_tbil); dev.off()
+svglite::svglite("fig_rcs_bun.svg", width = 6, height = 4); print(res_bun$plot); dev.off()
+svglite::svglite("fig_rcs_tbil.svg", width = 6, height = 4); print(res_tbil$plot); dev.off()
+svglite::svglite("fig_forest_S1.svg", width = 7, height = 6); print(fig_S1); dev.off()
+
+```
+
+```{r}
+# ここはあなたの既存コード（rqlm, crude_fits, build_table）をそのまま流用
+table_bun  <- build_table("bun10")
+table_tbil <- build_table("tbil")
+
+tab2_bun  <- gt::gt(table_bun)  %>%
+  gt::tab_header(title = md("**Table 2A. BUN and bowel resection**"),
+                 subtitle = "Crude and adjusted OR, RR, RD (95% CI)")
+tab2_tbil <- gt::gt(table_tbil) %>%
+  gt::tab_header(title = md("**Table 2B. T-bil and bowel resection**"),
+                 subtitle = "Crude and adjusted OR, RR, RD (95% CI)")
+
+tab2_bun; tab2_tbil
+# gtsave::gtsave(tab2_bun,  "Table2A_BUN.html")
+# gtsave::gtsave(tab2_tbil, "Table2B_Tbil.html")
+
+```
+
+```{r}
+(fig3 <- res_bun$plot + res_tbil$plot)
+# ggsave("Figure3_RCS.png", fig3, width = 10, height = 4, dpi = 300)
+
+```
+
+```{r}
+# resectionを数値化、候補を広めに取りつつ術後・術中は除外
+dat_corr <- ds09 %>%
+  dplyr::mutate(y = suppressWarnings(as.numeric(as.character(resection)))) %>%
+  dplyr::select(-tidyselect::matches("ope|operation|postop_|surgeon|readmission_date|death_date|op_text|dx_clean"))
+
+keep_cols <- names(dat_corr)[sapply(dat_corr, function(x) dplyr::n_distinct(x, na.rm = TRUE) >= 2)]
+dat_corr <- dat_corr[, keep_cols, drop = FALSE]
+
+# 連続はそのまま、因子は0/1/…に置換して相関（Spearman）
+corr_tbl <- purrr::map_dfr(names(dat_corr), function(v){
+  if (v == "y") return(NULL)
+  x <- dat_corr[[v]]
+  if (is.factor(x)) x <- as.numeric(x) - 1
+  if (is.character(x)) x <- as.numeric(factor(x)) - 1
+  if (!is.numeric(x)) return(NULL)
+  keep <- complete.cases(x, dat_corr$y)
+  if (sum(keep) < 10) return(NULL)
+  tibble::tibble(
+    variable = v,
+    spearman_r = suppressWarnings(cor(x[keep], dat_corr$y[keep], method = "spearman")),
+    n = sum(keep)
+  )
+}) %>% arrange(desc(abs(spearman_r)))
+
+supp_S1 <- gt::gt(corr_tbl) %>%
+  gt::tab_header(title = md("**Supplementary Table S1. Spearman correlation with bowel resection**"))
+supp_S1
+# gtsave::gtsave(supp_S1, "SuppTable_S1.html")
+
+```
+
+```{r}
+# 既出の cat/cont テーブルを使っていない場合は再計算
+if (!exists("tbl_out_cat") || !exists("tbl_out_cont")) {
+  ds_aux <- ds09
+  if (all(c("ope_day","dis_date") %in% names(ds_aux))) {
+    ds_aux <- ds_aux %>%
+      mutate(ope_day_d  = lubridate::as_date(ope_day),
+             dis_date_d = lubridate::as_date(dis_date),
+             los_postop = as.numeric(dis_date_d - ope_day_d) + 1)
+  }
+  vars_bin  <- intersect(c("reoperation","readmission","death"), names(ds_aux))
+  vars_cont <- intersect(c("opetime","bleeding","los_postop"),  names(ds_aux))
+
+  as01 <- function(v){ factor(as.numeric(as.character(v)), levels=c(0,1), labels=c("No","Yes")) }
+  ds_aux <- ds_aux %>% mutate(across(all_of(vars_bin), as01))
+
+  tbl_out_cat  <- ds_aux %>% select(all_of(vars_bin)) %>%
+    gtsummary::tbl_summary(type = list(everything() ~ "categorical"),
+                           statistic = list(all_categorical() ~ "{n} ({p}%)"),
+                           missing = "ifany") %>% gtsummary::bold_labels()
+  tbl_out_cont <- ds_aux %>% select(all_of(vars_cont)) %>%
+    gtsummary::tbl_summary(type = list(everything() ~ "continuous"),
+                           statistic = list(all_continuous() ~ "{median} ({p25}, {p75})"),
+                           digits = list(all_continuous() ~ 1), missing = "ifany") %>%
+    gtsummary::bold_labels()
+}
+
+supp_S2 <- gtsummary::tbl_stack(list(tbl_out_cat, tbl_out_cont)) %>%
+  gtsummary::modify_header(label ~ "**Outcome**") %>%
+  gtsummary::modify_caption("**Supplementary Table S2. Secondary outcomes**")
+supp_S2
+# save_gt(supp_S2, "SuppTable_S2.html")
+
+```
+
+```{r}
+# 必要パッケージ
+library(dplyr)
+library(sandwich)
+library(lmtest)
+
+# 0) サブグループ用の解析データ（bun10 を必ず作る）
+dat_sg <- ds09 %>%
+  dplyr::mutate(
+    y           = suppressWarnings(as.numeric(as.character(resection))),
+    age         = suppressWarnings(as.numeric(age)),
+    sex         = factor(sex, levels = c("Female","Male")),
+    hernia_type = factor(hernia_type, levels = c("Inguinal","Femoral","Obturator")),
+    bun         = suppressWarnings(as.numeric(bun)),
+    tbil        = suppressWarnings(as.numeric(tbil)),
+    bun10       = bun/10
+  )
+
+# 1) 層別フィット関数（age, sexで調整）
+fit_stratum <- function(xvar, data = dat_sg) {
+  stopifnot(xvar %in% names(data))
+  data %>%
+    dplyr::filter(!is.na(y), !is.na(.data[[xvar]]),
+                  !is.na(age), !is.na(sex), !is.na(hernia_type)) %>%
+    dplyr::group_by(hernia_type) %>%
+    dplyr::group_modify(~{
+      fit <- glm(stats::as.formula(paste0("y ~ ", xvar, " + age + sex")),
+                 family = binomial(), data = .x)
+      V   <- sandwich::vcovHC(fit, type = "HC0")
+      tt  <- lmtest::coeftest(fit, vcov. = V)
+      tibble::tibble(
+        term     = rownames(tt),
+        estimate = exp(tt[, 1]),
+        conf.low = exp(tt[, 1] - 1.96 * tt[, 2]),
+        conf.high= exp(tt[, 1] + 1.96 * tt[, 2]),
+        p.value  = tt[, 4],
+        n        = nrow(.x),
+        events   = sum(.x$y == 1, na.rm = TRUE)
+      ) %>%
+        dplyr::filter(term == xvar) %>%
+        dplyr::select(-term)   # ★ dplyrを明示
+    }) %>%
+    dplyr::ungroup()
+}
+
+# 2) 実行（BUN / T-bil）
+bun_strata  <- fit_stratum("bun10") %>% dplyr::mutate(exposure = "BUN (per 10 mg/dL)")
+tbil_strata <- fit_stratum("tbil")  %>% dplyr::mutate(exposure = "T-bil (per 1 mg/dL)")
+
+# 動作確認
+head(bun_strata)
+head(tbil_strata)
+
+```
+
+```{r}
+# bun / bun10 があるか確認
+names(ds09)
+# bun10 が無ければ
+ds09 <- ds09 %>% dplyr::mutate(bun = as.numeric(bun), bun10 = bun/10)
+
+```
+
+
+

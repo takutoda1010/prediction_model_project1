@@ -1,0 +1,698 @@
+---
+title: "Predicion_HCC_Rec"
+author: "Takuto Yoshida"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## データセットの読み込み
+```{r}
+# Set up ---------------------------------------------------------------------------------------------------
+install.packages("tidylog")
+install.packages("readxl")
+install.packages("DataExplorer")
+install.packages("dplyr")
+install.packages("forcats")
+install.packages("lubridate")
+install.packages("stringr")
+install.packages("readr")
+
+library(tidyverse)
+library(tidylog)
+library(readxl)
+library(DataExplorer)
+library(dplyr)
+library(forcats)
+library(lubridate)
+library(stringr)
+library(readr)
+
+# Import data set ------------------------------------------------------------------------------------------
+ds00_raw <- suppressWarnings(read_excel("/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/01_Data/BR分類で生存解析のデータupdate20250825.xlsx", sheet = 1))
+
+ds00 <- type_convert(ds00_raw)
+summary(ds00)
+```
+
+# Datasetの変数の再定義
+## ヘルパー関数の作成
+```{r}
+# 必要パッケージ
+# suppressPackageStartupMessages({
+#   library(dplyr)
+#   library(stringr)
+#   library(forcats)
+#   library(lubridate)
+# })
+
+# 作業用データ（元データは ds00 ）
+ds01 <- ds00
+
+# 列名の空白ゆらぎを正規化（全角/半角スペース、連続空白）
+names(ds01) <- names(ds01) |>
+  str_replace_all("[\u3000\\s]+", " ") |>
+  trimws()
+
+# --- ヘルパー関数 ---
+as_date_safely <- function(x){
+  if (inherits(x, "Date")) return(x)
+  if (is.numeric(x)) return(as.Date(x, origin = "1899-12-30"))
+  suppressWarnings(as.Date(parse_date_time(
+    as.character(x),
+    orders = c("Ymd","Y-m-d","Y/m/d","mdY","dmy","dmY","Ymd HMS","Y-m-d HMS","Y/m/d H:M:S")
+  )))
+}
+
+to_tf <- function(x){
+  z <- trimws(as.character(x))
+  z <- chartr("＋－", "+-", z)  # 全角→半角
+  rec <- c("TRUE"="TRUE","T"="TRUE","有"="TRUE","Yes"="TRUE","yes"="TRUE","1"="TRUE","+"="TRUE",
+           "FALSE"="FALSE","F"="FALSE","無"="FALSE","No"="FALSE","no"="FALSE","0"="FALSE","-"="FALSE")
+  as.logical(rec[z])  # 該当なしは NA
+}
+
+```
+
+#名前の揺らぎ
+```{r}
+# 群分け R/BR はそのまま使います（実在）
+# 再発有無 → 再発有無TRUE/FALSEの二群（既存コード互換の別名）
+if ("再発有無" %in% names(ds01) && !"再発有無TRUE/FALSEの二群" %in% names(ds01)) {
+  ds01 <- rename(ds01, `再発有無TRUE/FALSEの二群` = `再発有無`)
+}
+
+# StageI+II or III+IV → StageI+II or III+IV　非癌部肝(旧入力）
+if ("StageI+II or III+IV" %in% names(ds01) &&
+    !("StageI+II or III+IV　非癌部肝(旧入力）" %in% names(ds01))) {
+  ds01 <- rename(ds01, `StageI+II or III+IV　非癌部肝(旧入力）` = `StageI+II or III+IV`)
+}
+
+# 合併症 各項目：短い列名 → 「…順序変数」へ（既存コード互換の別名）
+if ("合併症胸水"   %in% names(ds01) && !"合併症胸水 0-2の順序変数"   %in% names(ds01))
+  ds01 <- rename(ds01, `合併症胸水 0-2の順序変数`   = `合併症胸水`)
+if ("合併症出血"   %in% names(ds01) && !"合併症出血 0-2の順序変数"   %in% names(ds01))
+  ds01 <- rename(ds01, `合併症出血 0-2の順序変数`   = `合併症出血`)
+if ("合併症胆汁漏" %in% names(ds01) && !"合併症胆汁漏順序変数"       %in% names(ds01))
+  ds01 <- rename(ds01, `合併症胆汁漏順序変数`       = `合併症胆汁漏`)
+if ("合併症消化管" %in% names(ds01) && !"合併症消化管順序変数"       %in% names(ds01))
+  ds01 <- rename(ds01, `合併症消化管順序変数`       = `合併症消化管`)
+if ("合併症術創"   %in% names(ds01) && !"合併症術創順序変数"         %in% names(ds01))
+  ds01 <- rename(ds01, `合併症術創順序変数`         = `合併症術創`)
+
+```
+# 基本属性
+```{r}
+# num（連番）
+# 基本属性（ID 追加）
+ds01 <- ds01 |>
+  mutate(id = as.character(ID...3)) |>   # ★追加：ID を英語名 id で保持
+  mutate(num = suppressWarnings(as.numeric(Num)))
+
+
+# group（Con/NAC vs others）ref = "others"
+# ds00$Group を "Con_or_NAC" / "other" に統一（表記ゆれ吸収）
+ds00 <- ds00 |>
+  dplyr::mutate(Group = {
+    g <- as.character(Group)
+    g <- stringr::str_replace_all(g, "\u3000", " ")   # 全角スペース→半角
+    g <- stringr::str_squish(g)                       # 余分な空白除去
+    gl <- tolower(g)
+    gl <- stringr::str_replace_all(gl, "_", " ")      # アンダースコアも空白扱いに
+
+    is_con_nac <- stringr::str_detect(gl, "\\bcon\\b") & stringr::str_detect(gl, "\\bnac\\b")
+    dplyr::if_else(is_con_nac, "Con_or_NAC", "other")
+  })
+
+# 参照カテゴリを "other" に固定
+ds01 <- ds00 <- dplyr::rename(ds00, group = Group)
+
+
+
+# 手術時/診断時 R/BR1/BR2（ref = "R"）
+if ("手術時群分け R/BR1/BR2" %in% names(ds01))
+  ds01 <- ds01 |> mutate(stage_surg = factor(`手術時群分け R/BR1/BR2`, levels = c("R","BR1","BR2")))
+if ("診断時群分け R/BR1/BR2" %in% names(ds01))
+  ds01 <- ds01 |> mutate(stage_diag = factor(`診断時群分け R/BR1/BR2`, levels = c("R","BR1","BR2")))
+
+# 群分け R/BR（BR1/BR2 を BR に寄せ、ref = "R"）
+if ("群分け R/BR" %in% names(ds01))
+  ds01 <- ds01 |>
+    mutate(group_rb = {
+      x <- str_squish(as.character(`群分け R/BR`))
+      x <- ifelse(x %in% c("BR1","BR2"), "BR", x)
+      factor(x, levels = c("R","BR"))  # reference = "R"
+    })
+
+```
+
+# 確認チャンク
+```{r}
+dplyr::count(ds00, Group)          # "Con or NAC" / "others" の2水準になっているか
+# ds01 側の group を作り直すなら（基準は "others"）
+ds01 <- ds01 |>
+  mutate(group = forcats::fct_relevel(factor(Group), "others"))
+dplyr::count(ds01, group)
+dplyr::count(ds01_model, group)
+
+```
+
+
+```{r}
+names(ds00)
+```
+
+
+# 治療前パラメータ
+```{r}
+# num（連番）
+ds01 <- ds01 |>
+  mutate(num = suppressWarnings(as.numeric(Num)))
+
+
+# 手術時/診断時 R/BR1/BR2（ref = "R"）
+if ("手術時群分け R/BR1/BR2" %in% names(ds01))
+  ds01 <- ds01 |> mutate(stage_surg = factor(`手術時群分け R/BR1/BR2`, levels = c("R","BR1","BR2")))
+if ("診断時群分け R/BR1/BR2" %in% names(ds01))
+  ds01 <- ds01 |> mutate(stage_diag = factor(`診断時群分け R/BR1/BR2`, levels = c("R","BR1","BR2")))
+
+# 群分け R/BR（BR1/BR2 を BR に寄せ、ref = "R"）
+if ("群分け R/BR" %in% names(ds01))
+  ds01 <- ds01 |>
+    mutate(group_rb = {
+      x <- str_squish(as.character(`群分け R/BR`))
+      x <- ifelse(x %in% c("BR1","BR2"), "BR", x)
+      factor(x, levels = c("R","BR"))  # reference = "R"
+    })
+
+```
+
+# 治療前腫瘍径/腫瘍個数
+```{r}
+# ds01 に英語名で作成
+ds01 <- ds01 |>
+  mutate(tum_diam_pre  = suppressWarnings(as.numeric(`治療前腫瘍径`))) |>
+  mutate(tum_count_pre = suppressWarnings(as.numeric(`治療前腫瘍個数`)))
+```
+
+
+# 予後再発関連
+```{r}
+# 生年月日/最終確認日/初診・入院日など
+for (nm in c("date of birth","最終確認日","初診日","入院日","再発日")) {
+  if (nm %in% names(ds01)) ds01[[switch(nm,
+    "date of birth"="dob","最終確認日"="last_followup","初診日"="first_visit_dt",
+    "入院日"="adm_dt","再発日"="recur_date")]] <- as_date_safely(ds01[[nm]])
+}
+
+# 年齢・年齢群（ref=60未満）
+if ("年齢" %in% names(ds01)) ds01 <- ds01 |> mutate(age = suppressWarnings(as.numeric(`年齢`)))
+if ("60未満、60以上" %in% names(ds01))
+  ds01 <- ds01 |> mutate(age_grp60 = factor(str_squish(as.character(`60未満、60以上`)),
+                                            levels = c("60未満","60以上")))  # reference
+
+# 全生存期間（月）
+if ("全生存期間m" %in% names(ds01))
+  ds01 <- ds01 |> mutate(os_months = suppressWarnings(as.numeric(`全生存期間m`)))
+
+# 生死（ref=生）/ 生1死0（ref=1）
+if ("生死" %in% names(ds01))
+  ds01 <- ds01 |> mutate(vital_status = factor(str_squish(as.character(`生死`)),
+                                               levels = c("生","死")))
+if ("生1死0" %in% names(ds01))
+  ds01 <- ds01 |> mutate(vital10 = factor(str_squish(as.character(`生1死0`)),
+                                          levels = c("1","0")))
+
+# 死因の4群化（ref=Cancer）
+ds01 <- ds01 |>
+  mutate(death_cause4 = {
+    y0 <- as.character(`死因`)
+    y  <- dplyr::case_when(
+      is.na(y0)                 ~ "aliver",        # ★欠損＝生存
+      stringr::str_detect(y0,"癌")     ~ "Cancer",
+      stringr::str_detect(y0,"肝不全") ~ "LiverFailure",
+      stringr::str_detect(y0,"他病")   ~ "OtherDisease",
+      TRUE                              ~ "Other"
+    )
+    factor(y, levels = c("aliver","Cancer","OtherDisease","LiverFailure","Other"))
+  })
+
+
+# 再発有無（TRUE/FALSE）/ 無再発生存（月）/ イベントフリー
+if ("再発有無TRUE/FALSEの二群" %in% names(ds01))
+  ds01 <- ds01 |> mutate(recur_tf = to_tf(`再発有無TRUE/FALSEの二群`))
+if ("無再発生存期間" %in% names(ds01))
+  ds01 <- ds01 |> mutate(rfs_months = suppressWarnings(as.numeric(`無再発生存期間`)))
+if ("再発or死0" %in% names(ds01))
+  ds01 <- ds01 |> mutate(eventfree10 = factor(str_squish(as.character(`再発or死0`)),
+                                              levels = c("1","0")))  # ref=1
+
+```
+
+# 再発日
+```{r}
+# ---- 再発日だけ正しく読むための再読込（他列は既存どおり）----
+library(readxl)
+
+excel_path <- "/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/01_Data/BR分類で生存解析のデータupdate20250825.xlsx"   # ★あなたのxlsxのパスに置き換え
+sheet_name <- 1                               # シート名/番号を必要に応じて
+
+# 1) 先に列名だけ取得
+cn <- names(readxl::read_excel(excel_path, sheet = sheet_name, n_max = 0))
+
+# 2) すべて guess にしておいて、再発日の型だけ numeric に固定
+col_types <- rep("guess", length(cn))
+col_types[match("再発日", cn)] <- "numeric"
+
+# 3) 読み込み（推測範囲は広めに）
+ds00 <- readxl::read_excel(excel_path, sheet = sheet_name,
+                           col_types = col_types, guess_max = 100000)
+
+# 4) Excel シリアル → Date（1900起算。Macの古い1904起算なら origin を "1904-01-01" に変更）
+if (is.numeric(ds00$`再発日`)) {
+  ds00$`再発日` <- as.Date(ds00$`再発日`, origin = "1899-12-30")
+}
+
+# （任意）頭出し確認
+ds00 %>% dplyr::select(`再発日`) %>% head(10)
+
+# ds01 の再発日（recur_date）を ds00 の再発日そのままに合わせたい場合だけ：
+if ("recur_date" %in% names(ds01)) {
+  ds01$recur_date <- ds00$`再発日`
+}
+# ds01_model にも入れているなら（存在する時だけ更新）
+if (exists("ds01_model") && "recur_date" %in% names(ds01_model)) {
+  ds01_model$recur_date <- ds01$recur_date
+}
+
+# 先頭10行（もう NA でなく日付が見えるはず）
+ds00 %>% dplyr::select(`再発日`) %>% head(10)
+
+# 行数が減っていないこと（削除はしていません）
+c(n_ds00 = nrow(ds00),
+  n_ds01 = if (exists("ds01")) nrow(ds01) else NA_integer_,
+  n_ds01_model = if (exists("ds01_model")) nrow(ds01_model) else NA_integer_)
+
+```
+
+# 確認
+```{r}
+# ds00: 元値の先頭（文字列シリアルの様子が見えるはず）
+head(ds00$`再発日`, 10)
+
+# ds01: 変換後（Date）
+head(ds01$recur_date, 10); summary(ds01$recur_date)
+
+# ds01_model: モデルにも入っているか
+"recur_date" %in% names(ds01_model); head(ds01_model$recur_date, 10)
+```
+
+
+#  ウイルスとか
+```{r}
+# HB/HBV既往/HCV（ref は陰性）
+if ("HB" %in% names(ds01))
+  ds01 <- ds01 |> mutate(hbv = factor(str_squish(as.character(HB)), levels = c("-","±","+")))
+if ("HB感染既往" %in% names(ds01))
+  ds01 <- ds01 |> mutate(hbv_past = factor(str_squish(as.character(`HB感染既往`)),
+                                           levels = c("-","±","+","*")))
+if ("HCV" %in% names(ds01))
+  ds01 <- ds01 |> mutate(hcv = factor(str_squish(as.character(HCV)), levels = c("-","+")))
+
+# ICG 10% 未満（ref=ICG 10%以上）/ ICG連続、HH15/LHL15
+if ("ICG 10%未満" %in% names(ds01))
+  ds01 <- ds01 |> mutate(icg10_cat = factor(str_squish(as.character(`ICG 10%未満`)),
+                                            levels = c("ICG 10%以上","ICG 10%未満")))
+if ("ICG" %in% names(ds01))  ds01 <- ds01 |> mutate(icg_r15 = as.numeric(ICG))
+if ("HH15" %in% names(ds01)) ds01 <- ds01 |> mutate(hh15 = as.numeric(HH15))
+if ("LHL15" %in% names(ds01)) ds01 <- ds01 |> mutate(lhl15 = as.numeric(LHL15))
+
+# liver damage / Child-Pugh（ref=A）
+if ("liver_damage" %in% names(ds01))
+  ds01 <- ds01 |> mutate(liver_damage = factor(liver_damage, levels = c("A","B","C")))
+if ("ChildPugh" %in% names(ds01))
+  ds01 <- ds01 |> mutate(child_pugh = factor(ChildPugh,   levels = c("A","B","C")))
+
+```
+
+# マーカー
+```{r}
+# AFP 500以上（ref=未満）/ AFP, AFP-L3, PIVKA2 200以上（ref=未満）/ PIVKA2, CEA, CA19-9
+if ("AFP500以上" %in% names(ds01))
+  ds01 <- ds01 |> mutate(afp500_cat = factor(str_squish(as.character(`AFP500以上`)),
+                                             levels = c("AFP500未満","AFP500以上")))
+if ("AFP" %in% names(ds01))      ds01 <- ds01 |> mutate(afp    = as.numeric(AFP))
+if ("AFP_L3" %in% names(ds01))   ds01 <- ds01 |> mutate(afp_l3 = as.numeric(AFP_L3))
+if ("PIVKA2 200以上" %in% names(ds01))
+  ds01 <- ds01 |> mutate(pivka200_cat = factor(str_squish(as.character(`PIVKA2 200以上`)),
+                                               levels = c("PIVKA2 200未満","PIVKA2 200以上")))
+if ("PIVKA2" %in% names(ds01))   ds01 <- ds01 |> mutate(pivka2 = as.numeric(PIVKA2))
+if ("CEA" %in% names(ds01))      ds01 <- ds01 |> mutate(cea    = as.numeric(CEA))
+if ("CA199" %in% names(ds01))    ds01 <- ds01 |> mutate(ca19_9 = as.numeric(CA199))
+
+# 身長・体重 / PS（ref=0）/ ASA（ref=1）
+if ("身長" %in% names(ds01))     ds01 <- ds01 |> mutate(height_cm = as.numeric(`身長`))
+if ("体重" %in% names(ds01))     ds01 <- ds01 |> mutate(weight_kg  = as.numeric(`体重`))
+if ("PS" %in% names(ds01))       ds01 <- ds01 |> mutate(ps   = ordered(PS,  levels = c("0","1","2","3","4")))
+if ("ASA" %in% names(ds01))      ds01 <- ds01 |> mutate(asa  = ordered(ASA, levels = c("1","2","3","4","5","6")))
+
+```
+# Lab
+```{r}
+# ds01 に英語名を作成（既に作っていればスキップ）
+ds01 <- ds01 |>
+  mutate(first_visit_dt = if ("初診日" %in% names(ds01)) as_date_safely(`初診日`) else first_visit_dt) |>
+  mutate(adm_dt         = if ("入院日" %in% names(ds01)) as_date_safely(`入院日`) else adm_dt) |>
+  mutate(plt   = if ("Plt" %in% names(ds01)) as.numeric(Plt) else plt) |>
+  mutate(alb   = if ("Alb" %in% names(ds01)) as.numeric(Alb) else alb) |>
+  mutate(tbil  = if ("Bil" %in% names(ds01)) as.numeric(Bil) else tbil) |>
+  mutate(che   = if ("ChE" %in% names(ds01)) as.numeric(ChE) else che) |>
+  mutate(ast   = if ("GOT" %in% names(ds01)) as.numeric(GOT) else ast) |>
+  mutate(alt   = if ("GPT" %in% names(ds01)) as.numeric(GPT) else alt) |>
+  mutate(nh3   = if ("AMN" %in% names(ds01)) as.numeric(AMN) else nh3) |>
+  mutate(pt_inr= if ("PT"  %in% names(ds01)) as.numeric(PT)  else pt_inr)
+
+# モデル列に確実に追加
+sel_cols <- unique(c(sel_cols,
+  "first_visit_dt","adm_dt","plt","alb","tbil","che","ast","alt","nh3","pt_inr"))
+ds01_model <- ds01 |> dplyr::select(dplyr::any_of(sel_cols))
+```
+```{r}
+ds00 %>% dplyr::select(`初診日`,`入院日`,Plt,Alb,Bil,ChE,GOT,GPT,AMN,PT) %>% head(3)
+ds01 %>% dplyr::select(first_visit_dt,adm_dt,plt,alb,tbil,che,ast,alt,nh3,pt_inr) %>% head(3)
+ds01_model %>% dplyr::select(first_visit_dt,adm_dt,plt,alb,tbil,che,ast,alt,nh3,pt_inr) %>% head(3)
+
+```
+
+
+
+# Volume
+```{r}
+if ("全肝容積" %in% names(ds01)) ds01 <- ds01 |> mutate(liver_vol        = as.numeric(`全肝容積`))
+if ("腫瘍容積" %in% names(ds01)) ds01 <- ds01 |> mutate(tumor_vol        = as.numeric(`腫瘍容積`))
+if ("残肝容積" %in% names(ds01)) ds01 <- ds01 |> mutate(remnant_vol      = as.numeric(`残肝容積`))
+if ("有効肝切率" %in% names(ds01)) ds01 <- ds01 |> mutate(func_resect_rate= as.numeric(`有効肝切率`))
+if ("PTPE" %in% names(ds01))       ds01 <- ds01 |> mutate(ptpe             = to_tf(PTPE))
+if ("前肝容積" %in% names(ds01))   ds01 <- ds01 |> mutate(pre_liver_vol   = as.numeric(`前肝容積`))
+if ("前腫瘍容積" %in% names(ds01)) ds01 <- ds01 |> mutate(pre_tumor_vol   = as.numeric(`前腫瘍容積`))
+if ("前残肝容積" %in% names(ds01)) ds01 <- ds01 |> mutate(pre_remnant_vol = as.numeric(`前残肝容積`))
+if ("術前機能的肝切除率" %in% names(ds01)) ds01 <- ds01 |> mutate(pre_func_rate = as.numeric(`術前機能的肝切除率`))
+if ("2W肝容積" %in% names(ds01))  ds01 <- ds01 |> mutate(w2_liver_vol     = as.numeric(`2W肝容積`))
+if ("2W腫瘍容積" %in% names(ds01)) ds01 <- ds01 |> mutate(w2_tumor_vol    = as.numeric(`2W腫瘍容積`))
+if ("2W機能的肝切除率" %in% names(ds01)) ds01 <- ds01 |> mutate(w2_func_rate = as.numeric(`2W機能的肝切除率`))
+
+```
+
+# Operation
+```{r}
+if ("手術日" %in% names(ds01))   ds01 <- ds01 |> mutate(op_date     = as_date_safely(`手術日`))
+if ("手術病名" %in% names(ds01)) ds01 <- ds01 |> mutate(op_dx_txt   = as.character(`手術病名`))
+if ("術式" %in% names(ds01))     ds01 <- ds01 |> mutate(op_proc_txt = as.character(`術式`))
+if ("術式分類" %in% names(ds01)) ds01 <- ds01 |> mutate(op_proc_cat = fct_drop(factor(str_squish(as.character(`術式分類`))))) # ref=先頭
+if ("出血量" %in% names(ds01))   ds01 <- ds01 |> mutate(bleed_ml = as.numeric(`出血量`))
+if ("術者" %in% names(ds01))     ds01 <- ds01 |> mutate(surgeon_name = as.character(`術者`))
+if ("Pringle" %in% names(ds01))   ds01 <- ds01 |> mutate(pringle = factor(str_squish(as.character(Pringle)),
+                                                                          levels = c("なし","部分肝","全肝"))) # ref=なし
+if ("開胸開腹" %in% names(ds01)) ds01 <- ds01 |> mutate(thoraco_lap = to_tf(`開胸開腹`))
+if ("切除肝重量" %in% names(ds01)) ds01 <- ds01 |> mutate(specimen_wt = as.numeric(`切除肝重量`))
+if ("肝再切除" %in% names(ds01))   ds01 <- ds01 |> mutate(rehepatectomy = to_tf(`肝再切除`))
+if ("腹腔鏡の使用" %in% names(ds01)) ds01 <- ds01 |> mutate(laparoscopy_use = fct_drop(factor(str_squish(as.character(`腹腔鏡の使用`)))))
+if ("切除治療時治癒度" %in% names(ds01)) ds01 <- ds01 |> mutate(curability = fct_drop(factor(str_squish(as.character(`切除治療時治癒度`)))))
+
+```
+# Operation time
+```{r}
+# 手術時間 → 分（op_time_min）に統一
+# ※ ds01 に既に op_time_min があるなら、この mutate だけ上書きでOK。他の列は一切変更しません。
+library(stringr)
+ds01 <- ds01 |>
+  dplyr::mutate(op_time_min = {
+    x <- str_squish(as.character(`手術時間`))
+    x <- str_replace_all(x, "：", ":")         # 全角コロン対策
+
+    has_colon <- str_detect(x, ":")
+    # "H:MM" or "HH:MM[:SS]" → 分
+    parts <- str_split_fixed(x, ":", 3)
+    hh <- suppressWarnings(as.numeric(parts[,1]))
+    mm <- suppressWarnings(as.numeric(parts[,2]))
+    ss <- suppressWarnings(as.numeric(parts[,3]))
+    from_colon <- ifelse(has_colon, hh*60 + mm + ifelse(is.na(ss), 0, round(ss/60)), NA_real_)
+
+    # 小数(= 1日の小数) → 分（1日=1440分）
+    num <- suppressWarnings(as.numeric(x))
+    from_frac <- ifelse(!has_colon & !is.na(num), num * 1440, NA_real_)
+
+    # どちらか取れた方を採用（丸めは最終段階で）
+    round(dplyr::coalesce(from_colon, from_frac))
+  })
+
+
+```
+
+# 確認
+```{r}
+ds01 %>% dplyr::select(`手術時間`, op_time_min) %>% head(10)
+
+
+ds00 %>% dplyr::select(`手術時間`) %>% head(8)
+ds01 %>% dplyr::select(op_time_min) %>% head(8)
+ds01_model %>% dplyr::select(op_time_min) %>% head(8)
+
+```
+
+
+# Pathology
+```{r}
+if ("最大径5以下、5~10、10以上" %in% names(ds01))
+  ds01 <- ds01 |> mutate(max_diam_cat = factor(str_squish(as.character(`最大径5以下、5~10、10以上`)),
+                                               levels = c("5以下","5~10","10以上")))  # ref=5以下
+if ("最大径" %in% names(ds01))      ds01 <- ds01 |> mutate(max_diam_cm = as.numeric(`最大径`))
+if ("単発or2~3" %in% names(ds01))
+  ds01 <- ds01 |> mutate(uni_vs_2to3 = factor(str_squish(as.character(`単発or2~3`)),
+                                              levels = c("単発","2~3")))  # ref=単発
+for (nm in c("vp","vv","va","b")) if (nm %in% names(ds01))
+  ds01[[paste0(nm, "_path")]] <- ordered(ds01[[nm]], levels = c("0","1","2","3","4"))  # ref=0
+if ("発育" %in% names(ds01))
+  ds01 <- ds01 |> mutate(growth_type = factor(str_squish(as.character(`発育`)),
+                                              levels = c("eg","ig","X")))  # ref=eg
+for (nm in c("fc","fc_inf","sf","sm")) if (nm %in% names(ds01))
+  ds01[[nm]] <- factor(str_squish(as.character(ds01[[nm]])), levels = c("-","+","X"))  # ref=-
+if ("im" %in% names(ds01))
+  ds01 <- ds01 |> mutate(im = fct_relevel(factor(str_squish(as.character(im))),
+                                          "+","0","1","2","3","S","X"))  # ref=+
+for (nm in c("t","n","m")) if (nm %in% names(ds01))
+  ds01[[nm]] <- ordered(ds01[[nm]], levels = if (nm=="t") c("1","2","3","4") else c("0","1"))  # ref=最小
+if ("stage" %in% names(ds01))
+  ds01 <- ds01 |> mutate(stage = fct_relevel(factor(str_squish(as.character(stage))),
+                                             "0","1","2","3","4A","4B","X"))  # ref=0
+if ("StageI+II or III+IV　非癌部肝(旧入力）" %in% names(ds01))
+  ds01 <- ds01 |> mutate(nc_liver_stage_old = factor(
+    str_squish(as.character(`StageI+II or III+IV　非癌部肝(旧入力）`)),
+    levels = c("0","I+II","III+IV")))  # ref=0
+
+```
+# 分化度
+```{r}
+# 作成
+if ("分化度(旧入力）" %in% names(ds01))
+  ds01 <- ds01 |> mutate(grade_old = forcats::fct_drop(
+    factor(stringr::str_squish(as.character(`分化度(旧入力）`)))))
+if ("分化度" %in% names(ds01))
+  ds01 <- ds01 |> mutate(grade_txt = as.character(`分化度`))
+
+# モデル列へ
+sel_cols <- unique(c(sel_cols, "grade_old","grade_txt"))
+ds01_model <- ds01 |> dplyr::select(dplyr::any_of(sel_cols))
+
+```
+
+```{r}
+table(ds01$grade_old, useNA="ifany") %>% head()
+ds01 %>% dplyr::select(grade_txt) %>% head(5)
+ds01_model %>% dplyr::select(grade_old, grade_txt) %>% head(5)
+
+```
+
+# 個数
+```{r}
+# 作成
+if ("個数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(count = suppressWarnings(as.numeric(`個数`)))
+if ("組織型" %in% names(ds01))
+  ds01 <- ds01 |> mutate(histology_txt = as.character(`組織型`))
+
+# モデル列へ
+sel_cols <- unique(c(sel_cols, "count", "histology_txt"))
+ds01_model <- ds01 |> dplyr::select(dplyr::any_of(sel_cols))
+
+```
+
+```{r}
+summary(ds00$個数); summary(ds01$count); summary(ds01_model$count)
+ds01_model %>% dplyr::select(histology_txt) %>% head(5)
+
+```
+
+# sm_mm
+```{r}
+if ("sm_mm" %in% names(ds01))
+  ds01 <- ds01 |> mutate(sm_mm = suppressWarnings(as.numeric(sm_mm)))  # 再明示
+
+sel_cols <- unique(c(sel_cols, "sm_mm"))
+ds01_model <- ds01 |> dplyr::select(dplyr::any_of(sel_cols))
+
+summary(ds01$sm_mm); summary(ds01_model$sm_mm)
+
+```
+
+# fibrosis
+```{r}
+# 作成（順序を明示、ref=最小）
+if ("fibrosis score(旧入力）" %in% names(ds01))
+  ds01 <- ds01 |> mutate(fibrosis_score_old =
+                           ordered(`fibrosis score(旧入力）`, levels = c("0","1","2","3","4")))
+if ("fibrosis score" %in% names(ds01))
+  ds01 <- ds01 |> mutate(fibrosis_score =
+                           ordered(`fibrosis score`, levels = c("0","1","2","3","4")))
+if ("grading score(旧入力）" %in% names(ds01))
+  ds01 <- ds01 |> mutate(grading_score_old =
+                           ordered(`grading score(旧入力）`, levels = c("0","1","2","3")))
+if ("grading score" %in% names(ds01))
+  ds01 <- ds01 |> mutate(grading_score =
+                           ordered(`grading score`, levels = c("0","1","2","3")))
+
+# モデル列へ
+sel_cols <- unique(c(sel_cols, "fibrosis_score_old","fibrosis_score",
+                              "grading_score_old","grading_score"))
+ds01_model <- ds01 |> dplyr::select(dplyr::any_of(sel_cols))
+
+```
+```{r}
+ds01 %>% dplyr::select(fibrosis_score_old,fibrosis_score,
+                       grading_score_old,grading_score) %>% summary()
+ds01_model %>% dplyr::select(fibrosis_score_old,fibrosis_score,
+                             grading_score_old,grading_score) %>% summary()
+
+```
+```{r}
+# 件数は揃っているか
+c(n_ds00 = nrow(ds00), n_ds01 = nrow(ds01), n_ds01_model = nrow(ds01_model))
+
+# 代表列の NA の扱い（温存されていること）
+sapply(ds01_model[, c("afp_l3","pivka200_cat","tum_diam_pre","recur_date")], function(x) sum(is.na(x)))
+
+```
+
+
+# Complication
+```{r}
+if ("術後TBil値" %in% names(ds01))
+  ds01 <- ds01 |> mutate(tbil_post_grade = ordered(`術後TBil値`, levels = c("0","1","2","3")))
+if ("術後アンモニア値" %in% names(ds01))
+  ds01 <- ds01 |> mutate(nh3_post_grade  = ordered(`術後アンモニア値`, levels = c("0","1","2","3")))
+if ("術後肝不全" %in% names(ds01))
+  ds01 <- ds01 |> mutate(pofil            = ordered(`術後肝不全`, levels = c("0","1","2","3")))
+if ("術後合併症" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_any_grade   = ordered(`術後合併症`, levels = c("0","1","2")))
+if ("合併症胸水 0-2の順序変数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_pleural     = ordered(`合併症胸水 0-2の順序変数`, levels = c("0","1","2")))
+if ("合併症呼吸器" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_resp        = ordered(`合併症呼吸器`, levels = c("0","1")))
+if ("合併症出血 0-2の順序変数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_bleeding    = ordered(`合併症出血 0-2の順序変数`, levels = c("0","1","2")))
+if ("合併症腹水" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_ascites     = ordered(`合併症腹水`, levels = c("0","1","2","3")))
+if ("合併症胆汁漏順序変数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_bile        = ordered(`合併症胆汁漏順序変数`, levels = c("0","1","2","3")))
+if ("合併症消化管順序変数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_gi          = ordered(`合併症消化管順序変数`, levels = c("0","1","2","3")))
+if ("合併症術創順序変数" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_wound       = ordered(`合併症術創順序変数`, levels = c("0","1","2","3")))
+if ("合併症" %in% names(ds01))
+  ds01 <- ds01 |> mutate(comp_txt         = as.character(`合併症`))
+
+```
+```{r}
+# 群分け R/BR があるならそれを最優先に使い、BR1/BR2 は BR に寄せる
+# それが無ければ 手術時/診断時 R/BR1/BR2 から合成
+if (!"group_rb" %in% names(ds01)) {
+  if ("群分け R/BR" %in% names(ds01)) {
+    ds01 <- ds01 |>
+      dplyr::mutate(group_rb = {
+        x <- stringr::str_squish(as.character(`群分け R/BR`))
+        x <- ifelse(x %in% c("BR1","BR2"), "BR", x)
+        factor(x, levels = c("R","BR"))   # ref = "R"
+      })
+  } else if ("手術時群分け R/BR1/BR2" %in% names(ds01)) {
+    ds01 <- ds01 |>
+      dplyr::mutate(group_rb = factor(
+        ifelse(`手術時群分け R/BR1/BR2` %in% c("BR1","BR2"), "BR", "R"),
+        levels = c("R","BR")))            # ref = "R"
+  } else if ("診断時群分け R/BR1/BR2" %in% names(ds01)) {
+    ds01 <- ds01 |>
+      dplyr::mutate(group_rb = factor(
+        ifelse(`診断時群分け R/BR1/BR2` %in% c("BR1","BR2"), "BR", "R"),
+        levels = c("R","BR")))            # ref = "R"
+  } else {
+    ds01 <- ds01 |>
+      dplyr::mutate(group_rb = factor(NA_character_, levels = c("R","BR"))) # 最後の手段
+  }
+}
+
+# クイック確認（任意）
+if ("group_rb" %in% names(ds01)) {
+  print(table(ds01$group_rb, useNA = "ifany"))
+  print(levels(ds01$group_rb))  # c("R","BR") になっていればOK
+}
+
+```
+
+
+```{r}
+sel_cols <- c(
+  "num","group","id", "stage_surg","stage_diag","group_rb",
+  "tum_diam_pre","tum_count_pre","vp_pre","vv_pre","n_pre","m_pre",
+  "dob","age","age_grp60","last_followup","os_months","vital_status","vital10",
+  "death_cause4","recur_date","rfs_months","recur_tf","eventfree10",
+  "hbv","hbv_past","hcv",
+  "icg10_cat","icg_r15","hh15","lhl15","liver_damage","child_pugh",
+  "afp500_cat","afp","afp_l3","pivka200_cat","pivka2","cea","ca19_9",
+  "height_cm","weight_kg","ps","asa",
+  "liver_vol","tumor_vol","remnant_vol","func_resect_rate","ptpe",
+  "pre_liver_vol","pre_tumor_vol","pre_remnant_vol","pre_func_rate",
+  "w2_liver_vol","w2_tumor_vol","w2_func_rate",
+  "op_date","op_dx_txt","op_proc_txt","op_proc_cat","op_time_min","bleed_ml",
+  "surgeon_name","pringle","thoraco_lap","specimen_wt","rehepatectomy",
+  "laparoscopy_use","curability",
+  "max_diam_cat","max_diam_cm","uni_vs_2to3","growth_type",
+  "vp_path","vv_path","va_path","b_path","fc","fc_inf","sf","im","sm","t","n","m","stage",
+  "nc_liver_stage_old",
+  "tbil_post_grade","nh3_post_grade","pofil","comp_any_grade",
+  "comp_pleural","comp_resp","comp_bleeding","comp_ascites","comp_bile","comp_gi","comp_wound",
+  "comp_txt"
+)
+
+missing <- setdiff(sel_cols, names(ds01))
+if (length(missing)) {
+  message("選択しようとして存在しない列: ", paste(missing, collapse = ", "))
+}
+
+ds01_model <- ds01 |>
+  dplyr::select(dplyr::any_of(sel_cols))   # 存在する列だけを選択（エラーにしない）
+
+```
+# data check
+```{r}
+summary(ds01_model)
+```
+
+
+```{r}
+plot_missing(ds01_model)
+plot_bar(ds01_model)
+plot_histogram(ds01_model)
+```
+

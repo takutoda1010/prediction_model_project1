@@ -1,0 +1,532 @@
+# ========================================================================
+# HCC再発予測モデル - 変数定義ファイル
+# Author: Takuto Yoshida
+# Date: 2024-11-07
+# Description: 変数の詳細定義、型、変換ルール、検証ルール
+# ========================================================================
+
+# 変数定義のメタ情報
+metadata:
+  version: "1.1"
+  last_updated: "2024-11-07"
+  description: "HCC再発予測モデルで使用する全変数の定義"
+
+# 原データ列名 → 標準変数名のマッピング
+column_mappings:
+  # === 識別子 ===
+  "ID...3": 
+    name: "id"
+    type: "character"
+    description: "患者ID"
+    required: true
+    
+  "Num": 
+    name: "num"
+    type: "integer"
+    description: "連番"
+    required: false
+    
+  # === 患者背景 ===
+  "年齢":
+    name: "age"
+    type: "numeric"
+    description: "手術時年齢"
+    unit: "years"
+    range: [0, 120]
+    required: true
+    
+  "性別":
+    name: "sex"
+    type: "factor"
+    description: "性別"
+    levels: ["F", "M"]
+    reference: "F"
+    required: true
+    
+  "身長":
+    name: "height_cm"
+    type: "numeric"
+    description: "身長"
+    unit: "cm"
+    range: [100, 250]
+    
+  "体重":
+    name: "weight_kg"
+    type: "numeric"
+    description: "体重"
+    unit: "kg"
+    range: [30, 200]
+    
+  # === 治療前腫瘍評価 ===
+  "治療前腫瘍径":
+    name: "tum_diam_pre"
+    type: "numeric"
+    description: "治療前腫瘍径"
+    unit: "cm"
+    range: [0, 30]
+    transform: "log_candidate"
+    
+  "治療前腫瘍個数":
+    name: "tum_count_pre"
+    type: "numeric"
+    description: "治療前腫瘍個数"
+    unit: "個"
+    range: [0, 100]
+    transform: "log_candidate"
+    
+  "治療前Vp":
+    name: "vp_pre"
+    type: "ordered"
+    description: "治療前門脈侵襲"
+    levels: [0, 1, 2, 3, 4]
+    reference: 0
+    
+  "治療前Vv":
+    name: "vv_pre"
+    type: "ordered"
+    description: "治療前肝静脈侵襲"
+    levels: [0, 1, 2, 3, 4]
+    reference: 0
+    
+  "治療前N":
+    name: "n_pre"
+    type: "factor"
+    description: "治療前リンパ節転移"
+    levels: [0, 1]
+    reference: 0
+    
+  "治療前M":
+    name: "m_pre"
+    type: "factor"
+    description: "治療前遠隔転移"
+    levels: [0, 1]
+    reference: 0
+    
+  # === 血液検査 ===
+  "Plt":
+    name: "plt"
+    type: "numeric"
+    description: "血小板数"
+    unit: "×10^4/μL"
+    range: [0, 100]
+    transform: "log_candidate"
+    
+  "Alb":
+    name: "alb"
+    type: "numeric"
+    description: "アルブミン"
+    unit: "g/dL"
+    range: [1, 6]
+    transform: "none"
+    
+  "Bil":
+    name: "tbil"
+    type: "numeric"
+    description: "総ビリルビン"
+    unit: "mg/dL"
+    range: [0, 30]
+    transform: "log_candidate"
+    
+  "ChE":
+    name: "che"
+    type: "numeric"
+    description: "コリンエステラーゼ"
+    unit: "IU/L"
+    range: [0, 500]
+    
+  "GOT":
+    name: "ast"
+    type: "numeric"
+    description: "AST"
+    unit: "IU/L"
+    range: [0, 5000]
+    transform: "log_candidate"
+    
+  "GPT":
+    name: "alt"
+    type: "numeric"
+    description: "ALT"
+    unit: "IU/L"
+    range: [0, 5000]
+    transform: "log_candidate"
+    
+  "AMN":
+    name: "nh3"
+    type: "numeric"
+    description: "アンモニア"
+    unit: "μg/dL"
+    range: [0, 300]
+    
+  "PT":
+    name: "pt_inr"
+    type: "numeric"
+    description: "PT-INR"
+    range: [0.5, 5]
+    
+  # === 肝機能評価 ===
+  "HB":
+    name: "hbv"
+    type: "factor"
+    description: "B型肝炎"
+    levels: ["-", "±", "+", "*"]
+    reference: "-"
+    
+  "HCV":
+    name: "hcv"
+    type: "factor"
+    description: "C型肝炎"
+    levels: [0, 1]
+    reference: 0
+    
+  "ICG":
+    name: "icg_r15"
+    type: "numeric"
+    description: "ICG R15"
+    unit: "%"
+    range: [0, 100]
+    transform: "log_candidate"
+    
+  "HH15":
+    name: "hh15"
+    type: "numeric"
+    description: "HH15"
+    range: [0, 1]
+    
+  "LHL15":
+    name: "lhl15"
+    type: "numeric"
+    description: "LHL15"
+    range: [0, 1]
+    transform: "log_candidate"
+    
+  "liver_damage":
+    name: "liver_damage"
+    type: "factor"
+    description: "肝障害度"
+    levels: ["A", "B", "C"]
+    reference: "A"
+    
+  "ChildPugh":
+    name: "child_pugh"
+    type: "factor"
+    description: "Child-Pugh分類"
+    levels: ["A", "B", "C"]
+    reference: "A"
+    
+  # === 腫瘍マーカー ===
+  "AFP":
+    name: "afp"
+    type: "numeric"
+    description: "AFP"
+    unit: "ng/mL"
+    range: [0, 1000000]
+    transform: "log_candidate"
+    cutpoints: [20, 200, 400]
+    
+  "AFP_L3":
+    name: "afp_l3"
+    type: "numeric"
+    description: "AFP-L3分画"
+    unit: "%"
+    range: [0, 100]
+    transform: "log_candidate"
+    
+  "PIVKA2":
+    name: "pivka2"
+    type: "numeric"
+    description: "PIVKA-II"
+    unit: "mAU/mL"
+    range: [0, 100000]
+    transform: "log_candidate"
+    cutpoints: [40, 200]
+    
+  "CEA":
+    name: "cea"
+    type: "numeric"
+    description: "CEA"
+    unit: "ng/mL"
+    range: [0, 1000]
+    transform: "log_candidate"
+    
+  "CA199":
+    name: "ca19_9"
+    type: "numeric"
+    description: "CA19-9"
+    unit: "U/mL"
+    range: [0, 10000]
+    transform: "log_candidate"
+    
+  # === 病理所見 ===
+  "最大径":
+    name: "max_diam_cm"
+    type: "numeric"
+    description: "腫瘍最大径"
+    unit: "cm"
+    range: [0, 50]
+    transform: "log_candidate"
+    
+  "個数":
+    name: "count"
+    type: "numeric"
+    description: "腫瘍個数"
+    unit: "個"
+    range: [1, 100]
+    transform: "log_candidate"
+    
+  "vp":
+    name: "vp_path"
+    type: "ordered"
+    description: "門脈侵襲（病理）"
+    levels: [0, 1, 2, 3, 4]
+    reference: 0
+    
+  "vv":
+    name: "vv_path"
+    type: "ordered"
+    description: "肝静脈侵襲（病理）"
+    levels: [0, 1, 2, 3, 4]
+    reference: 0
+
+# 派生変数の定義
+derived_variables:
+  # ALBI score
+  ALBIscore:
+    formula: "(log10(tbil * 17.1) * 0.66) + (alb * 10 * -0.085)"
+    dependencies: ["tbil", "alb"]
+    type: "numeric"
+    description: "ALBIスコア"
+    range: [-4, 2]
+    
+  # BMI
+  BMI:
+    formula: "weight_kg / (height_cm / 100)^2"
+    dependencies: ["weight_kg", "height_cm"]
+    type: "numeric"
+    description: "Body Mass Index"
+    unit: "kg/m²"
+    range: [10, 50]
+    
+  # 微小脈管侵襲（修正版）
+  # 術前Vp/Vv=0 かつ 術後Vp/Vv/Va/b>0 の場合のみ microVI=1
+  microVI:
+    description: "微小脈管侵襲（画像陰性・病理陽性）"
+    type: "logical"
+    dependencies: ["vp_pre", "vv_pre", "vp_path", "vv_path", "va_path", "b_path"]
+    definition: |
+      術前画像で脈管侵襲陰性（Vp=0 かつ Vv=0）で、
+      術後病理で脈管侵襲陽性（Vp>0 または Vv>0 または Va>0 または b>0）の場合のみ TRUE
+      注：術前Vp/Vv=1の場合、病理でVp/Vv=0でも microVI=0（術前1は0として扱わない）
+    formula: "(vp_pre == 0 & vv_pre == 0) & (vp_path > 0 | vv_path > 0 | va_path > 0 | b_path > 0)"
+    
+  # 肉眼的脈管侵襲（修正版）
+  # 術前Vp/Vv>=1 かつ 術後Vp/Vv>=1 の場合に macroVI=1
+  macroVI:
+    description: "肉眼的脈管侵襲（画像・病理とも陽性）"
+    type: "logical"
+    dependencies: ["vp_pre", "vv_pre", "vp_path", "vv_path"]
+    definition: |
+      術前画像で脈管侵襲陽性（Vp>=1 または Vv>=1）かつ
+      術後病理でも脈管侵襲陽性（Vp>=1 または Vv>=1）の場合に TRUE
+      注：術前陽性・術後陰性の場合は FALSE（downstaging）
+    formula: "(vp_pre >= 1 | vv_pre >= 1) & (vp_path >= 1 | vv_path >= 1)"
+    
+  # 2年再発
+  recur_2y:
+    formula: "recur_tf == TRUE & rfs_months <= 24"
+    dependencies: ["recur_tf", "rfs_months"]
+    type: "logical"
+    description: "2年以内の再発"
+    
+  # 打ち切り時間（2年）
+  time2y:
+    formula: "pmin(coalesce(rfs_months, os_months), 24)"
+    dependencies: ["rfs_months", "os_months"]
+    type: "numeric"
+    description: "2年打ち切り時間"
+    unit: "months"
+
+# 変数セット（モデル投入用）
+variable_sets:
+  # 必須変数（欠損不可）
+  essential:
+    - "id"
+    - "op_date"
+    - "age"
+    - "sex"
+    - "os_months"
+    - "rfs_months"
+    
+  # 術前変数セット（基本）
+  preoperative_core:
+    - "age"
+    - "sex"
+    - "plt"
+    - "alb"
+    - "tbil"
+    - "ast"
+    - "alt"
+    - "afp"
+    - "pivka2"
+    - "tum_diam_pre"
+    - "tum_count_pre"
+    - "vp_pre"
+    - "vv_pre"
+    - "n_pre"
+    - "m_pre"
+    
+  # 術前変数セット（拡張版）
+  preoperative_extended:
+    - "age"
+    - "sex"
+    # 血液検査
+    - "plt"
+    - "alb"
+    - "tbil"
+    - "che"
+    - "ast"
+    - "alt"
+    - "nh3"
+    - "pt_inr"
+    # 腫瘍マーカー
+    - "afp"
+    - "afp_l3"
+    - "pivka2"
+    - "cea"
+    - "ca19_9"
+    # 肝機能
+    - "hbv"
+    - "hcv"
+    - "icg_r15"
+    - "hh15"
+    - "lhl15"
+    - "liver_damage"
+    - "child_pugh"
+    # 腫瘍因子
+    - "tum_diam_pre"
+    - "tum_count_pre"
+    - "vp_pre"
+    - "vv_pre"
+    - "n_pre"
+    - "m_pre"
+    # 身体所見
+    - "ps"
+    - "asa"
+    
+  # 術後変数セット（病理）
+  postoperative_pathology:
+    - "max_diam_cm"
+    - "count"
+    - "vp_path"
+    - "vv_path"
+    - "va_path"
+    - "b_path"
+    # - "im"  # model_specificで除外指定
+    - "fc"
+    - "fc_inf"
+    - "sf"
+    - "sm"
+    - "t"
+    - "n"
+    - "m"
+    - "growth_type"
+    - "fibrosis_score"
+    - "grading_score"
+    
+  # モデル用変数セット（術前＋術後）
+  model_all_candidates:
+    - "age"
+    - "sex"
+    - "stage_diag"
+    # 血液・肝機能
+    - "plt"
+    - "alb"
+    - "tbil"
+    - "che"
+    - "ast"
+    - "alt"
+    - "pt_inr"
+    - "hbv"
+    - "hcv"
+    - "icg_r15"
+    - "hh15"
+    - "lhl15"
+    - "liver_damage"
+    - "child_pugh"
+    # マーカー（対数変換版）
+    - "afp_log1p"
+    - "pivka2_log1p"
+    - "cea_log1p"
+    - "ca19_9_log1p"
+    - "afp_l3_log1p"
+    # 手術
+    - "op_time_min"
+    - "bleed_ml_log1p"
+    - "specimen_wt_log1p"
+    # 病理
+    - "max_diam_cm_log1p"
+    - "count"
+    - "vp_path"
+    - "vv_path"
+    - "fc"
+    - "fc_inf"
+    - "sf"
+    - "sm"
+    - "t"
+    - "n"
+    - "m"
+    - "growth_type"
+    - "fibrosis_score"
+    - "grading_score"
+    # 派生変数
+    - "ALBIscore"
+    - "BMI"
+    - "microVI"
+    - "macroVI"
+
+# 変数の変換ルール
+transformations:
+  # 対数変換対象（右歪みの変数）
+  log_transform:
+    method: "log1p"  # log(x + 1)
+    candidates:
+      # マーカー
+      - "afp"
+      - "afp_l3"
+      - "pivka2"
+      - "cea"
+      - "ca19_9"
+      # 血液検査
+      - "ast"
+      - "alt"
+      - "tbil"
+      - "plt"
+      # 肝機能
+      - "icg_r15"
+      - "lhl15"
+      # 腫瘍
+      - "tum_diam_pre"
+      - "tum_count_pre"
+      - "max_diam_cm"
+      # 手術
+      - "bleed_ml"
+      - "specimen_wt"
+
+# 品質チェックルール
+quality_checks:
+  # microVI/macroVI の論理チェック
+  vi_logic_checks:
+    - name: "vi_mutual_exclusive"
+      condition: "microVI == TRUE & macroVI == TRUE"
+      message: "microVIとmacroVIが同時にTRUEは論理エラー"
+      action: "error"
+      
+    - name: "macro_requires_pre_positive"
+      condition: "macroVI == TRUE & vp_pre == 0 & vv_pre == 0"
+      message: "macroVIがTRUEなのに術前脈管侵襲が陰性"
+      action: "error"
+      
+    - name: "micro_requires_pre_negative"
+      condition: "microVI == TRUE & (vp_pre > 0 | vv_pre > 0)"
+      message: "microVIがTRUEなのに術前脈管侵襲が陽性"
+      action: "error"
+      

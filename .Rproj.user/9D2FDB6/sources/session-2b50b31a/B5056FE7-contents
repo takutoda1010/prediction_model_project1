@@ -1,0 +1,606 @@
+---
+title: "3_Missiness_and_feature_engineering_v1.0"
+author: "Takuto Yoshida"
+date: "2025-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 研究の概要
+2年以内の早期再発を予測する臨床予測モデルの開発
+モデルの作成方法は以下5通りをトライしまずはc-index, time dependent AUCを評価する。
+- Stepwise AIC, forward selection
+- Stepwise BIC, backward selection
+- Univariate screening (P < 0.2) -> Stepwise selection (stopping rule: p < 0.1) ERASL modelと同じ方法
+- Recursive feature elimination
+- LASSO (またはElastic net)による変数選択
+
+最終的には4-6項目程度の変数を選択し、リスクスコアを作成する。
+
+# このスクリプトの目的
+① 欠損値の対応
+今回は、臨床の現場で欠損地があっても対応可能なようSingle Imputationを施行
+② 連続変数の調整
+Right/Left skew dataを対数変換など行う。
+
+# データセットの変数を整える
+①まず以下の不要な変数を削除する。
+num age_grp60 hbv_past first_visit_dt adm_dt icg10_cat afp500_cat uni_vs_2to3 nc_liver_stage_old fibrosis_score_old  grading_score_old tbil_post_grade nh3_post_grade pofil
+```{r}
+# ---- CHUNK: make ds02 (drop selected columns) ----
+drop_cols <- c(
+  "num","age_grp60","hbv_past","first_visit_dt","adm_dt",
+  "icg10_cat","afp500_cat","uni_vs_2to3","nc_liver_stage_old",
+  "fibrosis_score_old","grading_score_old","tbil_post_grade",
+  "nh3_post_grade","pofil"
+)
+
+# ない列は自動スキップ
+missing_cols <- setdiff(drop_cols, names(ds01_model))
+if (length(missing_cols)) message("存在しないので削除スキップ: ", paste(missing_cols, collapse = ", "))
+
+ds02 <- ds01_model |> dplyr::select(-dplyr::any_of(drop_cols))
+
+# 確認（行数は不変、削除できた列名の一覧）
+c(n_ds01_model = nrow(ds01_model), n_ds02 = nrow(ds02))
+setdiff(names(ds01_model), names(ds02))
+
+```
+
+②データの規則のされ方を確認し、解析可能な形に変える
+まず、データの外観を把握
+```{r}
+# ---- CHUNK: audit ds02 (light normalization & overview) ----
+# 1) 前処理：前後空白と全角空白の整理（文字列列のみ）
+ds02 <- ds02 |>
+  dplyr::mutate(dplyr::across(
+    .cols = where(is.character),
+    .fns  = ~ stringr::str_squish(stringr::str_replace_all(., "\u3000", " "))
+  ))
+
+# 2) 論理値にできそうな列（Yes/No, 有/無, TRUE/FALSE, +/- など）を自動検出→to_tfで変換
+tf_tokens <- c("TRUE","FALSE","T","F","有","無","Yes","No","yes","no","1","0","+","-","＋","－")
+is_tf_like <- function(x) {
+  vals <- unique(na.omit(trimws(as.character(x))))
+  length(vals) > 0 && all(vals %in% tf_tokens)
+}
+tf_cols <- names(ds02)[vapply(ds02, is_tf_like, logical(1))]
+if (length(tf_cols)) {
+  ds02 <- ds02 |> dplyr::mutate(dplyr::across(dplyr::all_of(tf_cols), to_tf))
+  message("論理型に変換した列: ", paste(tf_cols, collapse = ", "))
+}
+
+# 3) ゼロ分散（全員同じ値）の列を検出（必要なら除外の判断材料）
+zero_var_cols <- names(ds02)[vapply(ds02, function(x) dplyr::n_distinct(x, na.rm = TRUE) <= 1, logical(1))]
+if (length(zero_var_cols)) message("ゼロ分散の列: ", paste(zero_var_cols, collapse = ", "))
+
+# 4) DataExplorerによる概観と欠損
+DataExplorer::plot_intro(ds02,   title = "Overview: ds02")
+DataExplorer::plot_missing(ds02, title = "Missingness: ds02")
+
+```
+データ分析に必要な型に変更し、referenceがあっているか確認する
+```{r}
+# ---- CHUNK: make ds03 from ds02 (explicit recodes, no loops) ----
+ds03 <- ds02 |>
+  # R/BR系
+  dplyr::mutate(stage_surg = factor(stage_surg, levels = c("R","BR1","BR2"))) |>
+  dplyr::mutate(stage_diag = factor(stage_diag, levels = c("R","BR1","BR2"))) |>
+  dplyr::mutate(group_rb   = factor(group_rb,   levels = c("R","BR")))         |>
+  # 画像・臨床（術前）
+  dplyr::mutate(vp_pre = factor(vp_pre, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(vv_pre = factor(vv_pre, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(n_pre  = factor(n_pre,  levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(m_pre  = factor(m_pre,  levels = c(FALSE, TRUE))) |>
+  # 基本属性
+  dplyr::mutate(sex = factor(sex, levels = c("F","M"))) |>
+  # 予後系
+  dplyr::mutate(vital_status = factor(vital_status, levels = c("生","死"))) |>
+  dplyr::mutate(vital10      = factor(vital10,      levels = c(TRUE, FALSE))) |>
+  dplyr::mutate(recur_tf     = factor(recur_tf,     levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(eventfree10  = factor(eventfree10,  levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(hbv          = factor(hbv, levels = c("-","±","+","*"))) |>
+  dplyr::mutate(hcv          = factor(hcv, levels = c(FALSE, TRUE))) |>
+  # スコア類
+  dplyr::mutate(ps  = factor(ps,  levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(asa = factor(asa, levels = c(1,2,3,4,5,6))) |>
+  # 体積系は「0/非0」の二値化（参照=0）。連続値のままカテゴリ化するとレベル過多になるため
+  dplyr::mutate(liver_vol        = factor(dplyr::case_when(is.na(liver_vol)        ~ NA_real_, liver_vol        > 0 ~ 1, TRUE ~ 0), levels = c(0,1))) |>
+  dplyr::mutate(tumor_vol        = factor(dplyr::case_when(is.na(tumor_vol)        ~ NA_real_, tumor_vol        > 0 ~ 1, TRUE ~ 0), levels = c(0,1))) |>
+  dplyr::mutate(remnant_vol      = factor(dplyr::case_when(is.na(remnant_vol)      ~ NA_real_, remnant_vol      > 0 ~ 1, TRUE ~ 0), levels = c(0,1))) |>
+  dplyr::mutate(func_resect_rate = factor(dplyr::case_when(is.na(func_resect_rate) ~ NA_real_, func_resect_rate > 0 ~ 1, TRUE ~ 0), levels = c(0,1))) |>
+  # 病理（血管侵襲等）
+  dplyr::mutate(vp_path = factor(vp_path, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(vv_path = factor(vv_path, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(va_path = factor(va_path, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(b_path  = factor(b_path,  levels = c(0,1,2,3,4))) |>
+  # 陰陽（-,+）→ 0/1
+  dplyr::mutate(fc     = factor(dplyr::recode(fc,     "-" = 0, "+" = 1, .default = NA_real_), levels = c(0,1))) |>
+  dplyr::mutate(fc_inf = factor(dplyr::recode(fc_inf, "-" = 0, "+" = 1, .default = NA_real_), levels = c(0,1))) |>
+  dplyr::mutate(sf     = factor(dplyr::recode(sf,     "-" = 0, "+" = 1, .default = NA_real_), levels = c(0,1))) |>
+  dplyr::mutate(sm     = factor(dplyr::recode(sm,     "-" = 0, "+" = 1, .default = NA_real_), levels = c(0,1))) |>
+  # im は 0を基準、それ以外(1/2/3/+)は1、S/Xは欠損扱い
+  dplyr::mutate(im = factor(dplyr::case_when(
+    is.na(im)              ~ NA_real_,
+    im %in% c("S","X")     ~ NA_real_,
+    im %in% c("0")         ~ 0,
+    im %in% c("1","2","3","+") ~ 1,
+    TRUE                   ~ NA_real_
+  ), levels = c(0,1))) |>
+  # TNM/Stage
+  dplyr::mutate(t = factor(t, levels = c(0,1,2,3,4))) |>
+  dplyr::mutate(n = factor(n, levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(m = factor(m, levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(stage = factor(stage, levels = c("1","2","3","4A","4B","0","X"))) |>
+  # 線維化・分化スコア（ref=1）
+  dplyr::mutate(fibrosis_score = factor(fibrosis_score, levels = c(1,0,2,3,4))) |>
+  dplyr::mutate(grading_score  = factor(grading_score,  levels = c(1,0,2,3))) |>
+  # 合併症（参照=0）
+  dplyr::mutate(comp_any_grade = factor(comp_any_grade, levels = c(0,1,2,3))) |>
+  dplyr::mutate(comp_pleural   = factor(comp_pleural,   levels = c(0,1,2,3))) |>
+  dplyr::mutate(comp_resp      = factor(comp_resp,      levels = c(FALSE, TRUE))) |>
+  dplyr::mutate(comp_bleeding  = factor(comp_bleeding,  levels = c(0,1,2,3))) |>
+  dplyr::mutate(comp_ascites   = factor(comp_ascites,   levels = c(0,1,2,3)))
+
+```
+
+referenceの確認
+```{r}
+sapply(ds03[c("stage_surg","stage_diag","group_rb","vp_pre","vv_pre","n_pre","m_pre","sex",
+              "vital_status","vital10","recur_tf","eventfree10","hbv","hcv","ps","asa",
+              "liver_vol","tumor_vol","remnant_vol","func_resect_rate","vp_path","vv_path",
+              "va_path","b_path","fc","fc_inf","sf","im","sm","t","n","m","stage",
+              "fibrosis_score","grading_score","comp_any_grade","comp_pleural","comp_resp",
+              "comp_bleeding","comp_ascites")],
+       function(x) if(is.factor(x)) levels(x) else class(x))
+
+```
+
+
+③下記の変数を作成する
+ベースの初期化
+```{r}
+# ds04 を ds03 のコピーで用意（以降は ds04 に追加していきます）
+ds04 <- ds03
+```
+
+MicroVI
+```{r}
+# microVI（preは vp_pre と vv_pre のみ、path 側の NA は 0 扱い）
+ds04 <- ds04 |>
+  dplyr::mutate(
+    microVI =
+      (as.numeric(as.character(vp_pre)) == 0 &
+       as.numeric(as.character(vv_pre)) == 0) &
+      (
+        dplyr::coalesce(as.numeric(as.character(vp_path)), 0) > 0 |
+        dplyr::coalesce(as.numeric(as.character(vv_path)), 0) > 0 |
+        dplyr::coalesce(as.numeric(as.character(va_path)), 0) > 0 |
+        dplyr::coalesce(as.numeric(as.character(b_path)),  0) > 0
+      )
+  )
+```
+MacroVI
+```{r}
+# macroVI: 画像/術前でいずれか陽性（va_pre/b_preは使わない）
+ds04 <- ds04 |>
+  dplyr::mutate(
+    macroVI = {
+      vp_pre_num <- suppressWarnings(as.numeric(as.character(vp_pre)))
+      vv_pre_num <- suppressWarnings(as.numeric(as.character(vv_pre)))
+      (vp_pre_num > 0) | (vv_pre_num > 0)
+    }
+  )
+
+# 任意チェック
+table(ds04$macroVI, useNA = "ifany")
+```
+
+vp_path=0なのにvp_pre>0の症例
+```{r}
+# 「vp_path = 0 なのに vp_pre > 0」の件数・割合・ID確認
+vp_prepos_path0 <- ds04 |>
+  dplyr::mutate(
+    vp_pre_num  = suppressWarnings(as.numeric(as.character(vp_pre))),
+    vp_path_num = dplyr::coalesce(suppressWarnings(as.numeric(as.character(vp_path))), 0)
+  ) |>
+  dplyr::filter(vp_path_num == 0, vp_pre_num > 0)
+
+n_all  <- nrow(ds04)
+n_vp   <- nrow(vp_prepos_path0)
+prop_vp_prepos_path0 <- n_vp / n_all
+
+prop_vp_prepos_path0   # 割合（0-1）
+n_vp                    # 件数
+vp_prepos_path0 |> dplyr::select(id, vp_pre, vp_path) |> head(20)
+```
+
+vv_path=0なのに、vv_pre>0の症例
+```{r}
+vv_prepos_path0 <- ds04 |>
+  dplyr::mutate(
+    vv_pre_num  = suppressWarnings(as.numeric(as.character(vv_pre))),
+    vv_path_num = dplyr::coalesce(suppressWarnings(as.numeric(as.character(vv_path))), 0)
+  ) |>
+  dplyr::filter(vv_path_num == 0, vv_pre_num > 0)
+
+n_vv   <- nrow(vv_prepos_path0)
+prop_vv_prepos_path0 <- n_vv / n_all
+
+prop_vv_prepos_path0
+n_vv
+vv_prepos_path0 |> dplyr::select(id, vv_pre, vv_path) |> head(20)
+
+```
+
+
+recur_2y
+```{r}
+# ---- recur_2y（rfs_monthsのみ使用）----
+ds04 <- ds04 |>
+  dplyr::mutate(
+    # recur_tf を頑健に論理化（factor/chr/TRUE/FALSE の混在でも対応）
+    .recur_event = dplyr::case_when(
+      as.character(recur_tf) %in% c("TRUE","True","1","Yes","有")  ~ TRUE,
+      as.character(recur_tf) %in% c("FALSE","False","0","No","無") ~ FALSE,
+      TRUE ~ NA
+    ),
+    # 2年以内再発
+    recur_2y = dplyr::case_when(
+      .recur_event & rfs_months <= 24 ~ TRUE,
+      .recur_event & rfs_months >  24 ~ FALSE,
+      !.recur_event                   ~ FALSE,   # 無再発は2年内再発なし
+      TRUE                            ~ NA       # まれに recur_tf 解釈不能時
+    )
+  ) |>
+  dplyr::select(-.recur_event)
+
+# 確認（任意）
+table(ds04$recur_tf, ds04$recur_2y, useNA = "ifany")
+sum(is.na(ds04$recur_2y))
+```
+
+eventfree_2y
+```{r}
+ds04 <- ds04 |>
+  dplyr::mutate(
+    # 2年以内再発（rfs_months と recur_tf を素直に使う）
+    .rec2y = (recur_tf %in% TRUE) & (!is.na(rfs_months)) & (rfs_months <= 24),
+
+    # 2年以内死亡（os_months と vital を素直に使う）
+    .is_dead = (vital_status %in% "死") | isFALSE(vital10),
+    .death2y = .is_dead & (!is.na(os_months)) & (os_months <= 24),
+
+    # eventfree_2y: 2年以内に再発 or 死亡があれば FALSE
+    # 両方の情報が揃っていて2年を超えて無イベントなら TRUE
+    # 情報不足は NA
+    eventfree_2y = dplyr::case_when(
+      .rec2y | .death2y ~ FALSE,
+      (!is.na(rfs_months) & rfs_months > 24) &
+      (!is.na(os_months)  & os_months  > 24) ~ TRUE,
+      TRUE ~ NA
+    )
+  ) |>
+  dplyr::select(-.rec2y, -.death2y, -.is_dead)
+
+```
+
+vital_2y
+```{r}
+ds04 <- ds04 |>
+  dplyr::mutate(
+    vital_2y = dplyr::case_when(
+      !is.na(os_months) & os_months <= 24 & (vital_status %in% "死" | isFALSE(vital10)) ~ FALSE, # 2年以内死亡
+      !is.na(os_months) & os_months >  24                                               ~ TRUE,  # 2年超まで生存
+      TRUE                                                                              ~ NA
+    )
+  )
+
+```
+
+time2y
+```{r}
+ds04 <- ds04 |>
+  dplyr::mutate(
+    .time_base = dplyr::coalesce(rfs_months, os_months),
+    time2y = dplyr::if_else(!is.na(.time_base), pmin(.time_base, 24), NA_real_)
+  ) |>
+  dplyr::select(-.time_base)
+
+```
+
+ALBIscore
+```{r}
+ds04 <- ds04 |>
+  dplyr::mutate(
+    .bil_umolL = ifelse(!is.na(tbil), tbil * 17.1, NA_real_),
+    .alb_gL    = ifelse(!is.na(alb),  alb  * 10,  NA_real_),
+    ALBIscore  = dplyr::case_when(
+      !is.na(.bil_umolL) & .bil_umolL > 0 & !is.na(.alb_gL) ~ (log10(.bil_umolL) * 0.66) + (.alb_gL * -0.085),
+      TRUE ~ NA_real_
+    )
+  ) |>
+  dplyr::select(-.bil_umolL, -.alb_gL)
+
+```
+
+BMI
+```{r}
+ds04 <- ds04 |>
+  dplyr::mutate(
+    BMI = dplyr::case_when(
+      !is.na(weight_kg) & !is.na(height_cm) & height_cm > 0 ~ weight_kg / ( (height_cm/100)^2 ),
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+# 今回の解析に使用するデータセットを構築する。
+group == "Con or NAC"除外
+```{r}
+# ① Con or NAC を除外
+ds04_sub <- ds04 |>
+  dplyr::filter(is.na(group) | group != "Con or NAC")
+
+# （任意確認）
+c(n_before = nrow(ds04), n_after = nrow(ds04_sub))
+```
+
+解析に不要な変数（列）を削除
+```{r}
+# ② 指定列を削除して ds05 を作成
+drop_cols <- c(
+  "group","dob","pivka200_cat","height_cm","weight_kg","surgeon_name",
+  "comp_any_grade","comp_pleural","comp_resp","comp_bleeding", "curability",
+  "comp_ascites","comp_bile","comp_gi","comp_wound","comp_txt"
+)
+
+ds05 <- ds04_sub |>
+  dplyr::select(-dplyr::any_of(drop_cols))
+
+# （任意確認）
+setdiff(drop_cols, names(ds04_sub))  # 存在しなかった列があればここに出ます
+```
+
+欠損値の多い列（欠損値が30%以上）をリストアップ
+```{r}
+# ③ 欠損率の集計と30%以上の変数
+miss_tbl <- ds05 |>
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ mean(is.na(.)))) |>
+  tidyr::pivot_longer(dplyr::everything(), names_to = "variable", values_to = "missing_rate") |>
+  dplyr::mutate(
+    n = nrow(ds05),
+    n_missing = round(missing_rate * n)
+  ) |>
+  dplyr::arrange(dplyr::desc(missing_rate))
+
+vars_over30 <- miss_tbl |>
+  dplyr::filter(missing_rate >= 0.30)
+
+# 出力
+vars_over30
+```
+
+```{r}
+# 欠損30%以上は除外するが、recur_date / recur_2y は常に残す
+always_keep <- "recur_date"
+
+low_na <- names(ds05)[colMeans(is.na(ds05)) < 0.30]
+cols_keep <- intersect(names(ds05), unique(c(always_keep, low_na)))  # 元の列順で
+
+ds06 <- ds05 |> dplyr::select(dplyr::all_of(cols_keep))
+
+# 確認（どちらも残っているはず）
+setdiff(always_keep, names(ds06))
+c(ncol_before = ncol(ds05), ncol_after = ncol(ds06))
+
+```
+
+# 欠損値に対しSingle Imputationを行う。
+```{r}
+# ① 欠損のある変数リスト（件数・割合）
+n <- nrow(ds06)
+miss_before <- ds06 |>
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ sum(is.na(.)))) |>
+  tidyr::pivot_longer(dplyr::everything(), names_to = "var", values_to = "n_miss") |>
+  dplyr::mutate(rate = n_miss / n) |>
+  dplyr::filter(n_miss > 0) |>
+  dplyr::arrange(dplyr::desc(rate))
+miss_before
+```
+
+連続変数に対して中央値でSingle Imputation
+```{r}
+# ② 連続変数（numeric）の単一補完：中央値
+# （Dateはnumericではないので対象外）
+ds07 <- ds06 |>
+  dplyr::mutate(
+    dplyr::across(
+      .cols = where(is.numeric),
+      .fns  = ~ ifelse(is.na(.x), stats::median(.x, na.rm = TRUE), .x)
+    )
+  )
+
+```
+
+カテゴリカル変数に対し観測比率を考慮してSingle Imputation
+```{r}
+# ③ カテゴリカル（factor/ordered）の単一補完：観測比率で確率的代入
+set.seed(20251102)
+
+impute_factor_prop <- function(x){
+  if (!is.factor(x)) return(x)
+  if (all(is.na(x))) return(x)                 # 参照分布が無い場合は未処理のまま
+  idx <- which(is.na(x)); if (!length(idx)) return(x)
+  obs <- x[!is.na(x)]
+  tab <- table(obs)
+  probs <- as.numeric(tab) / sum(tab)
+  vals  <- names(tab)
+  sampled <- sample(vals, length(idx), replace = TRUE, prob = probs)
+  x[idx] <- factor(sampled, levels = levels(x), ordered = is.ordered(x))
+  x
+}
+
+ds07 <- ds07 |>
+  dplyr::mutate(
+    dplyr::across(
+      .cols = where(is.factor) | where(is.ordered),
+      .fns  = impute_factor_prop
+    )
+  )
+```
+
+まだ欠損地の残る変数
+```{r}
+# ④ 補完後の欠損リスト（確認）
+n2 <- nrow(ds07)
+miss_after <- ds07 |>
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ sum(is.na(.)))) |>
+  tidyr::pivot_longer(dplyr::everything(), names_to = "var", values_to = "n_miss") |>
+  dplyr::mutate(rate = n_miss / n2) |>
+  dplyr::filter(n_miss > 0) |>
+  dplyr::arrange(dplyr::desc(rate))
+miss_after
+```
+
+# 連続変数の変換
+偏りの強い連続変数
+```{r}
+# ① ds07の連続変数のうち強い歪み（|skew| > 1）のある変数をリストアップ
+skewness_ <- function(x){
+  x <- x[is.finite(x)]
+  if (length(x) < 3) return(NA_real_)
+  m <- mean(x); s <- stats::sd(x)
+  if (!is.finite(s) || s == 0) return(NA_real_)
+  mean((x - m)^3) / (s^3)
+}
+
+num_cols <- names(ds07)[vapply(ds07, is.numeric, logical(1))]
+cont_cols <- num_cols[!grepl("^(id|num)$", num_cols, ignore.case = TRUE) &
+                        vapply(ds07[num_cols], function(v) length(unique(na.omit(v))) >= 5, logical(1))]
+
+skew_tbl <- tibble::tibble(var = cont_cols) |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    skew = skewness_(ds07[[var]]),
+    min  = suppressWarnings(min(ds07[[var]], na.rm = TRUE)),
+    p25  = suppressWarnings(stats::quantile(ds07[[var]], 0.25, na.rm = TRUE, type = 2)),
+    med  = suppressWarnings(stats::median(ds07[[var]], na.rm = TRUE)),
+    p75  = suppressWarnings(stats::quantile(ds07[[var]], 0.75, na.rm = TRUE, type = 2)),
+    max  = suppressWarnings(max(ds07[[var]], na.rm = TRUE)),
+    dir  = dplyr::case_when(
+      is.finite(skew) & skew >  1 ~ "right",
+      is.finite(skew) & skew < -1 ~ "left",
+      TRUE                        ~ "none"
+    )
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::filter(dir != "none") |>
+  dplyr::arrange(dplyr::desc(abs(skew)))
+
+skew_tbl
+```
+
+right skewの変数を変換
+```{r}
+# ② 歪み対処：right→log1p(非負) or asinh(負値含む)／left→反転log1p（max - x）
+# （元変数は残し、新しい列を追加）※ rfs_months / os_months は常に除外
+apply_transforms <- function(df, skew_info){
+  exclude_vars <- c("rfs_months","os_months")
+  stopifnot(all(c("var","dir") %in% names(skew_info)))
+  si <- skew_info[!(skew_info$var %in% exclude_vars), , drop = FALSE]
+
+  for (i in seq_len(nrow(si))) {
+    v   <- si$var[i]
+    dir <- si$dir[i]
+    if (!v %in% names(df) || !is.numeric(df[[v]])) next
+
+    x <- df[[v]]
+
+    if (identical(dir, "right")) {
+      xmin <- suppressWarnings(min(x, na.rm = TRUE))
+      if (is.finite(xmin) && xmin >= 0) {
+        df[[paste0(v, "_log1p")]] <- log1p(x)
+      } else {
+        df[[paste0(v, "_asinh")]]  <- asinh(x)
+      }
+    } else if (identical(dir, "left")) {
+      xmax <- suppressWarnings(max(x, na.rm = TRUE))
+      if (is.finite(xmax)) {
+        df[[paste0(v, "_reflog1p")]] <- log1p(pmax(xmax - x, 0))
+      }
+    }
+  }
+  df
+}
+
+ds07 <- apply_transforms(ds07, skew_tbl)
+
+# 追加された列を確認（末尾10列を表示）
+tail(names(ds07), 10)
+
+```
+
+
+```{r}
+# 変換前後ヒストグラム（各変数ごとに1図：左=元, 右=変換後）
+if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
+library(ggplot2); library(patchwork)
+
+# 変換後列（*_log1p / *_asinh / *_reflog1p）と元変数の対応を抽出
+tf_cols <- names(ds07)[grepl("(_log1p|_asinh|_reflog1p)$", names(ds07))]
+if (length(tf_cols) == 0L) {
+  message("可視化対象（変換列）がありません。先に変換を実行してください。")
+} else {
+  map_tbl <- tibble::tibble(tf = tf_cols) |>
+    dplyr::mutate(var = sub("(_log1p|_asinh|_reflog1p)$", "", tf)) |>
+    dplyr::filter(var %in% names(ds07)) |>
+    dplyr::distinct(var, tf)
+
+  fd_bins <- function(x, min_bins = 10, max_bins = 80) {
+    x <- x[is.finite(x)]
+    if (length(x) < 2) return(30)
+    iqr <- stats::IQR(x, na.rm = TRUE)
+    bw  <- 2 * iqr / (length(x)^(1/3))
+    if (!is.finite(bw) || bw <= 0) return(30)
+    rng <- range(x, na.rm = TRUE)
+    bins <- ceiling((rng[2] - rng[1]) / bw)
+    bins <- max(min_bins, min(max_bins, bins))
+    bins
+  }
+
+  for (i in seq_len(nrow(map_tbl))) {
+    v  <- map_tbl$var[i]
+    tf <- map_tbl$tf[i]
+
+    x0 <- ds07[[v]]
+    xt <- ds07[[tf]]
+
+    # 元・変換後のbinsを個別に算出
+    b0 <- fd_bins(x0)
+    bt <- fd_bins(xt)
+
+    p_left <- ggplot(data = data.frame(x = x0), aes(x = x)) +
+      geom_histogram(bins = b0, na.rm = TRUE) +
+      labs(title = paste0(v, " (original)"), x = v, y = "count") +
+      theme_minimal(base_size = 12)
+
+    p_right <- ggplot(data = data.frame(x = xt), aes(x = x)) +
+      geom_histogram(bins = bt, na.rm = TRUE) +
+      labs(title = paste0(tf, " (transformed)"), x = tf, y = "count") +
+      theme_minimal(base_size = 12)
+
+    p <- p_left + p_right + plot_layout(ncol = 2) +
+      plot_annotation(title = paste0("Histogram: ", v, " → ", tf))
+    print(p)
+  }
+}
+
+```
+
+今回、Single Imputationのみを行ってds07を作成している。
+今後、Multiple Imputationを行い、ds07_MIを作成することも検討する。
+

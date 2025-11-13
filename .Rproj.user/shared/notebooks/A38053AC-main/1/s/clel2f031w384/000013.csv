@@ -1,0 +1,666 @@
+"0","# ========================================================================"
+"0","# 3. データ読み込みとクリーニング"
+"0","# ========================================================================"
+"0",""
+"0","message(""\n📊 Data Processing Pipeline"")"
+"2","
+📊 Data Processing Pipeline
+"
+"0","message(""----------------------------------------"")"
+"2","----------------------------------------
+"
+"0","# 3.1 データ読み込み"
+"0","message(""\n[Step 1/7] Loading and preparing data..."")"
+"2","
+[Step 1/7] Loading and preparing data...
+"
+"0","dm <- load_and_prepare_data("
+"0","  config_path = config_path,"
+"0","  variables_path = variables_path"
+"0",")"
+"2","
+========================================
+"
+"2","Starting Data Loading Pipeline
+"
+"2","========================================
+"
+"2","
+📄 Loading configuration files...
+"
+"2","
+📊 Loading raw data...
+"
+"2","
+📁 Loading data from: BR分類で生存解析のデータupdate20251016.xlsx
+"
+"2","✅ Data loaded: 990 rows × 151 columns
+"
+"2","📌 Created dataset: ds00
+"
+"2","
+🔧 Normalizing column names...
+"
+"2","📌 Created dataset: ds01
+"
+"2","
+🔄 Applying column mapping...
+"
+"2","📋 Column mapping: 35 applied, 1 not found
+"
+"2","   Not found: ID...3
+"
+"2","📌 Created dataset: ds02
+"
+"2","
+📐 Adjusting data types...
+"
+"2","Warning: Duplicated column names deduplicated: '手術時群分け R/BR1/BR2' => '手術時群分け R/BR1/BR2_1' [7], '診断時群分け R/BR1/BR2' => '診断時群分け R/BR1/BR2_1' [8], '群分け R/BR' => '群分け R/BR_1' [9], '術前治療+/-' => '術前治療+/-_1' [19], '術前治療+/-' => '術前治療+/-_2' [20], 'ID' => 'ID_1' [27]"
+"2","📌 Created dataset: ds03
+"
+"2","
+✔️ Validating data...
+"
+"2","Data validation failed:
+"
+"2","  ❌ Missing required columns: id, op_date, os_months, rfs_months
+"
+"1","
+=== Dataset Summary ===
+"
+"1","ds00: 990 rows × 151 columns
+"
+"1","ds01: 990 rows × 151 columns
+"
+"1","ds02: 990 rows × 185 columns
+"
+"1","ds03: 990 rows × 185 columns
+"
+"1","
+Current version: ds03
+"
+"2","
+✅ Data loading pipeline completed!
+"
+"2","========================================
+
+"
+"0","# 3.2 データクリーニング"
+"0","message(""\n[Step 2/7] Cleaning data..."")"
+"2","
+[Step 2/7] Cleaning data...
+"
+"0","dm <- clean_data_pipeline(dm, config, variables)"
+"2","
+========================================
+"
+"2","Starting Data Cleaning Pipeline
+"
+"2","========================================
+"
+"2","
+🧹 Cleaning variable names...
+"
+"2","  Changed variable names:
+"
+"2","    '手術時群分け R/BR1/BR2' → '手術時群分け_R_BR1_BR2'
+"
+"2","    '診断時群分け R/BR1/BR2' → '診断時群分け_R_BR1_BR2'
+"
+"2","    '群分け R/BR' → '群分け_R_BR'
+"
+"2","    '手術時群分け R/BR1/BR2' → '手術時群分け_R_BR1_BR2'
+"
+"2","    '診断時群分け R/BR1/BR2' → '診断時群分け_R_BR1_BR2'
+"
+"2","    '群分け R/BR' → '群分け_R_BR'
+"
+"2","    '術前治療+/-' → '術前治療_plus_minus'
+"
+"2","    '術前治療+/-' → '術前治療_plus_minus'
+"
+"2","    '術前治療+/-' → '術前治療_plus_minus'
+"
+"2","    'date of birth' → 'date_of_birth'
+"
+"2","    ... and 12 more
+"
+"2","📌 Created dataset: ds00
+"
+"2","
+🏷️ Creating stage variables...
+"
+"2","Warning: argument 'pattern' has length > 1 and only the first element will be used"
+"2","  ✓ Created: stage_surg
+"
+"2","Warning: argument 'pattern' has length > 1 and only the first element will be used"
+"2","  ✓ Created: stage_diag
+"
+"2","Warning: argument 'pattern' has length > 1 and only the first element will be used"
+"2","  ✓ Created: group_rb
+"
+"2","📌 Created dataset: ds01
+"
+"2","
+💀 Creating death cause categories...
+"
+"2","  ✓ Created: death_cause4
+"
+"2","  Distribution:
+"
+"2","    aliver: 629
+"
+"2","    Cancer: 262
+"
+"2","    LiverFailure: 26
+"
+"2","    Other: 73
+"
+"2","📌 Created dataset: ds02
+"
+"2","
+⚙️ Setting reference levels for categorical variables...
+"
+"2","  ✓ sex: reference = 'F'
+"
+"2","  ✓ group_rb: reference = 'R'
+"
+"2","  ✓ stage_surg: reference = 'R'
+"
+"2","  ✓ stage_diag: reference = 'R'
+"
+"2","📌 Created dataset: ds03
+"
+"2","
+📊 Setting ordered factors...
+"
+"2","  ✓ vp_pre: ordered (0-4)
+"
+"2","  ✓ vv_pre: ordered (0-4)
+"
+"2","  ✓ vp_path: ordered (0-4)
+"
+"2","  ✓ vv_path: ordered (0-4)
+"
+"2","  ✓ fibrosis_score: ordered (0-4)
+"
+"2","  ✓ grading_score: ordered (0-3)
+"
+"2","📌 Created dataset: ds04
+"
+"2","
+🔧 Handling special variable codings...
+"
+"2","  ✓ fc: converted -/+ to 0/1
+"
+"2","  ✓ fc_inf: converted -/+ to 0/1
+"
+"2","  ✓ sf: converted -/+ to 0/1
+"
+"2","  ✓ sm: converted -/+ to 0/1
+"
+"2","  ✓ im: standardized (0 vs 1+)
+"
+"2","  ✓ hbv: factor levels set
+"
+"2","  ✓ child_pugh: factor levels set (A/B/C)
+"
+"2","  ✓ liver_damage: factor levels set (A/B/C)
+"
+"2","📌 Created dataset: ds05
+"
+"2","
+📅 Processing date variables...
+"
+"2","  ✓ Created: op_date from 手術日
+"
+"2","  ✓ Created: last_followup from 最終確認日
+"
+"2","  ✓ Created: first_visit_dt from 初診日
+"
+"2","  ✓ Created: adm_dt from 入院日
+"
+"2","  ✓ Created: recur_date from 再発日
+"
+"2","📌 Created dataset: ds06
+"
+"2","
+📏 Processing volume variables...
+"
+"2","📌 Created dataset: ds07
+"
+"2","
+🔍 Performing data quality checks...
+"
+"2","  ⚠ plt out of range [0, 100]: 1 cases
+"
+"2","  ⚠ che out of range [0, 500]: 8 cases
+"
+"2","  ⚠ pt_inr out of range [0.5, 5]: 990 cases
+"
+"2","  ⚠ lhl15 out of range [0, 1]: 1 cases
+"
+"2","  ⚠ afp out of range [0, 1e+06]: 3 cases
+"
+"2","  ⚠ pivka2 out of range [0, 100000]: 28 cases
+"
+"2","  ⚠ count out of range [1, 100]: 3 cases
+"
+"2","
+  Total issues found: 7 types
+"
+"2","📌 Created dataset: ds08
+"
+"1","
+=== Dataset Summary ===
+"
+"1","ds00: 990 rows × 185 columns
+"
+"1","ds01: 990 rows × 188 columns
+"
+"1","ds02: 990 rows × 189 columns
+"
+"1","ds03: 990 rows × 189 columns
+"
+"1","ds04: 990 rows × 189 columns
+"
+"1","ds05: 990 rows × 189 columns
+"
+"1","ds06: 990 rows × 194 columns
+"
+"1","ds07: 990 rows × 194 columns
+"
+"1","ds08: 990 rows × 194 columns
+"
+"1","
+Current version: ds08
+"
+"2","
+✅ Data cleaning pipeline completed!
+"
+"2","========================================
+
+"
+"0","# 3.3 特徴量エンジニアリング"
+"0","message(""\n[Step 3/7] Engineering features..."")"
+"2","
+[Step 3/7] Engineering features...
+"
+"0","dm <- feature_engineering_pipeline(dm, config, variables)"
+"2","
+========================================
+"
+"2","Starting Feature Engineering Pipeline
+"
+"2","========================================
+"
+"2","
+📊 Computing ALBI score...
+"
+"2","  ✓ ALBI score: median = -2.73, range = [-3.67, -1.03]
+"
+"2","  ✓ ALBI grade distribution:
+"
+"2","    Grade 1: 631 (63.7%)
+"
+"2","    Grade 2: 355 (35.9%)
+"
+"2","    Grade 3: 2 (0.2%)
+"
+"2","    Grade NA: 2 (0.2%)
+"
+"2","📌 Created dataset: ds00
+"
+"2","
+📏 Computing BMI...
+"
+"2","  ✓ BMI: median = 23.4, range = [12.0, 42.4]
+"
+"2","📌 Created dataset: ds01
+"
+"2","
+🔬 Creating vascular invasion variables...
+"
+"2","  ✓ microVI: 203 cases (20.5%)
+"
+"2","  ✓ macroVI: 139 cases (14.0%)
+"
+"2","📌 Created dataset: ds02
+"
+"2","
+⏱️ Creating time-related variables...
+"
+"2","  ✓ Created rfs_months from 無再発生存期間
+"
+"2","  ✓ Created os_months from 全生存期間m
+"
+"2","  ✓ Created recur_tf from 再発有無TRUE_FALSEの二群
+"
+"2","  ✓ Created vital_status from 生死
+"
+"2","  ✓ Created vital10 from 生1死0
+"
+"2","  ✓ time2y: created (median = 16.0 months)
+"
+"2","  ✓ recur_2y: 420 events (42.4%)
+"
+"2","  ✓ eventfree_2y: 510 event-free (51.5%)
+"
+"2","  ✓ vital_2y: 813 alive at 2y (82.1%)
+"
+"2","📌 Created dataset: ds03
+"
+"2","
+📈 Transforming skewed variables...
+"
+"2","  ✓ afp_log1p: created (skew = 25.21)
+"
+"2","  ✓ afp_l3_log1p: created (skew = 1.38)
+"
+"2","  ✓ pivka2_log1p: created (skew = 8.97)
+"
+"2","  ✓ cea_log1p: created (skew = 4.41)
+"
+"2","  ✓ ca19_9_log1p: created (skew = 8.87)
+"
+"2","  ✓ ast_log1p: created (skew = 5.97)
+"
+"2","  ✓ alt_log1p: created (skew = 2.67)
+"
+"2","  ✓ tbil_log1p: created (skew = 10.75)
+"
+"2","  ✓ plt_log1p: created (skew = 10.50)
+"
+"2","  ✓ icg_r15_log1p: created (skew = 2.46)
+"
+"2","  ✓ lhl15_log1p: created (skew = 29.58)
+"
+"2","  ✓ tum_diam_pre_log1p: created (skew = 1.31)
+"
+"2","  ✓ tum_count_pre_log1p: created (skew = 4.58)
+"
+"2","  ✓ max_diam_cm_log1p: created (skew = 1.60)
+"
+"2","  Total transformations: 14
+"
+"2","📌 Created dataset: ds04
+"
+"2","
+🔧 Handling missing values...
+"
+"2","  ⚠ Removing 44 variables with >30% missing:
+"
+"2","    - 治療前M部位 (99.8% missing)
+"
+"2","    - 治療前AFP (99.2% missing)
+"
+"2","    - 治療前PIVKA2 (99.2% missing)
+"
+"2","    - 治療前Child (99.0% missing)
+"
+"2","    - 電話 (99.7% missing)
+"
+"2","
+  Applying median imputation...
+"
+"2","    手術番号: 10 values imputed (median = 2730.50)
+"
+"2","    ChE: 26 values imputed (median = 252.00)
+"
+"2","    ICG: 4 values imputed (median = 13.45)
+"
+"2","    HH15: 90 values imputed (median = 0.60)
+"
+"2","    LHL15: 87 values imputed (median = 0.92)
+"
+"2","    AFP_L3: 23 values imputed (median = 3.10)
+"
+"2","    CEA: 140 values imputed (median = 3.20)
+"
+"2","    CA199: 150 values imputed (median = 22.35)
+"
+"2","    身長: 259 values imputed (median = 163.60)
+"
+"2","    体重: 258 values imputed (median = 62.80)
+"
+"2","    出血量: 2 values imputed (median = 330.00)
+"
+"2","    切除肝重量: 79 values imputed (median = 270.00)
+"
+"2","    CaNo: 50 values imputed (median = 1.00)
+"
+"2","    va: 10 values imputed (median = 0.00)
+"
+"2","    t: 2 values imputed (median = 2.00)
+"
+"2","    m: 1 values imputed (median = 0.00)
+"
+"2","    術後TBil値: 244 values imputed (median = 0.00)
+"
+"2","    術後合併症: 244 values imputed (median = 0.00)
+"
+"2","    合併症胸水_0_minus2の順序変数: 131 values imputed (median = 0.00)
+"
+"2","    合併症呼吸器: 131 values imputed (median = 0.00)
+"
+"2","    合併症出血_0_minus2の順序変数: 129 values imputed (median = 0.00)
+"
+"2","    合併症腹水: 131 values imputed (median = 0.00)
+"
+"2","    合併症胆汁漏順序変数: 128 values imputed (median = 0.00)
+"
+"2","    合併症消化管順序変数: 131 values imputed (median = 0.00)
+"
+"2","    合併症術創順序変数: 136 values imputed (median = 0.00)
+"
+"2","    height_cm: 259 values imputed (median = 163.60)
+"
+"2","    weight_kg: 258 values imputed (median = 62.80)
+"
+"2","    che: 26 values imputed (median = 252.00)
+"
+"2","    icg_r15: 4 values imputed (median = 13.45)
+"
+"2","    hh15: 90 values imputed (median = 0.60)
+"
+"2","    lhl15: 87 values imputed (median = 0.92)
+"
+"2","    afp_l3: 23 values imputed (median = 3.10)
+"
+"2","    cea: 140 values imputed (median = 3.20)
+"
+"2","    ca19_9: 150 values imputed (median = 22.35)
+"
+"2","    count: 1 values imputed (median = 1.00)
+"
+"2","    ALBIscore: 2 values imputed (median = -2.73)
+"
+"2","    BMI: 259 values imputed (median = 23.44)
+"
+"2","    afp_l3_log1p: 23 values imputed (median = 1.41)
+"
+"2","    cea_log1p: 140 values imputed (median = 1.44)
+"
+"2","    ca19_9_log1p: 150 values imputed (median = 3.15)
+"
+"2","    icg_r15_log1p: 4 values imputed (median = 2.67)
+"
+"2","    lhl15_log1p: 87 values imputed (median = 0.65)
+"
+"2","    HB: 20 values imputed (mode = -)
+"
+"2","    HB感染既往: 135 values imputed (mode = +)
+"
+"2","    HCV: 21 values imputed (mode = -)
+"
+"2","    腫瘍分類: 1 values imputed (mode = HCC)
+"
+"2","    初診日: 18 values imputed (mode = 2014/03/03)
+"
+"2","    ICG_10%未満: 58 values imputed (mode = ICG 10%以上)
+"
+"2","    liver_damage: 16 values imputed (mode = A)
+"
+"2","    AFP500以上: 45 values imputed (mode = AFP500未満)
+"
+"2","    PIVKA2_200以上: 49 values imputed (mode = PIVKA2 200未満)
+"
+"2","    手術病名: 1 values imputed (mode = HCC)
+"
+"2","    統計用手術病名: 42 values imputed (mode = HCC)
+"
+"2","    術式: 2 values imputed (mode = 肝右葉切除)
+"
+"2","    術式分類: 42 values imputed (mode = 肝(拡大)右葉切除)
+"
+"2","    手術時間: 2 values imputed (mode = 5:00)
+"
+"2","    術者: 10 values imputed (mode = 神山 俊哉)
+"
+"2","    Pringle: 42 values imputed (mode = 全肝)
+"
+"2","    開胸開腹: 2 values imputed (mode = FALSE)
+"
+"2","    切除治療時治癒度: 10 values imputed (mode = 肝切除中心の治療により遺残病変無し)
+"
+"2","    病理番号: 10 values imputed (mode = 000020)
+"
+"2","    分化度: 2 values imputed (mode = mod)
+"
+"2","    組織型: 232 values imputed (mode = trabecular)
+"
+"2","    発育: 18 values imputed (mode = eg)
+"
+"2","    fc: 17 values imputed (mode = 1)
+"
+"2","    fc_inf: 74 values imputed (mode = 1)
+"
+"2","    sf: 22 values imputed (mode = 1)
+"
+"2","    im: 154 values imputed (mode = 0)
+"
+"2","    sm: 28 values imputed (mode = 0)
+"
+"2","    stage: 3 values imputed (mode = 2)
+"
+"2","    StageI_plusII_or_III_plusIV　非癌部肝_旧入力）: 45 values imputed (mode = III+IV)
+"
+"2","    非癌部肝: 89 values imputed (mode = CH)
+"
+"2","    fibrosis_score: 60 values imputed (mode = 2)
+"
+"2","    grading_score: 192 values imputed (mode = 1)
+"
+"2","    hbv: 20 values imputed (mode = -)
+"
+"2","    ALBIgrade: 2 values imputed (mode = 1)
+"
+"2","    BMI_category: 259 values imputed (mode = Normal)
+"
+"2","    肝再切除: 43 values imputed (mode = FALSE)
+"
+"2","    Hx: 42 values imputed (mode = TRUE)
+"
+"2","
+  ⚠ Warning: 7 variables still have missing values:
+"
+"2","    - 手術時群分け_R_BR1_BR2: 0.0% missing
+"
+"2","    - 診断時群分け_R_BR1_BR2: 0.0% missing
+"
+"2","    - 群分け_R_BR: 0.0% missing
+"
+"2","    - 入院日: 0.8% missing
+"
+"2","    - first_visit_dt: 1.8% missing
+"
+"2","📌 Created dataset: ds05
+"
+"2","
+📋 Preparing variable sets...
+"
+"2","  Variable set 'model_all_candidates':
+"
+"2","    Requested: 43 variables
+"
+"2","    Available: 39 variables
+"
+"2","    Missing: op_time_min, bleed_ml_log1p, specimen_wt_log1p, growth_type
+"
+"1","
+=== Dataset Summary ===
+"
+"1","ds00: 990 rows × 196 columns
+"
+"1","ds01: 990 rows × 198 columns
+"
+"1","ds02: 990 rows × 200 columns
+"
+"1","ds03: 990 rows × 209 columns
+"
+"1","ds04: 990 rows × 223 columns
+"
+"1","ds05: 990 rows × 177 columns
+"
+"1","ds06: 990 rows × 194 columns
+"
+"1","ds07: 990 rows × 194 columns
+"
+"1","ds08: 990 rows × 194 columns
+"
+"1","
+Current version: ds05
+"
+"2","
+📊 Feature Engineering Summary:
+"
+"2","  Total variables: 223
+"
+"2","  Numeric variables: 118
+"
+"2","  Factor variables: 24
+"
+"2","  Derived variables created: 24
+"
+"2","
+✅ Feature engineering pipeline completed!
+"
+"2","========================================
+
+"
+"0","# 最終データの取得"
+"0","final_data <- dm$get_current()"
+"0",""
+"0","# 欠損値の補完"
+"0","final_data <- handle_missing_values(final_data, config, method = ""median"")"
+"2","
+🔧 Handling missing values...
+"
+"2","
+  Applying median imputation...
+"
+"2","
+  ⚠ Warning: 7 variables still have missing values:
+"
+"2","    - 手術時群分け_R_BR1_BR2: 0.0% missing
+"
+"2","    - 診断時群分け_R_BR1_BR2: 0.0% missing
+"
+"2","    - 群分け_R_BR: 0.0% missing
+"
+"2","    - 入院日: 0.8% missing
+"
+"2","    - first_visit_dt: 1.8% missing
+"
+"0","message(sprintf(""\n  ✓ Final dataset: %d rows × %d columns"", "
+"0","               nrow(final_data), ncol(final_data)))"
+"2","
+  ✓ Final dataset: 990 rows × 177 columns
+"
+"0","# データの保存（オプション）"
+"0","if (config$runtime$save_intermediate) {"
+"0","  saveRDS(final_data, file.path(paths$output, ""processed_data.rds""))"
+"0","  message(""  ✓ Processed data saved"")"
+"0","}"
+"2","  ✓ Processed data saved
+"

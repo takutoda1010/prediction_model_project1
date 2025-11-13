@@ -1,0 +1,28 @@
+{
+    "id": "88ADD20C",
+    "path": "~/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/04_Script/R/06_model_evaluator.Rmd",
+    "project_path": "04_Script/R/06_model_evaluator.Rmd",
+    "type": "r_markdown",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1762998419167.0,
+    "source_on_save": false,
+    "relative_order": 10,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "1068,0",
+        "scrollLine": "1042",
+        "last_setup_crc32": "2b50b31abb338d19",
+        "docOutlineVisible": "0"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1763008000,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1763008000745,
+    "read_only": false,
+    "read_only_alternatives": []
+}

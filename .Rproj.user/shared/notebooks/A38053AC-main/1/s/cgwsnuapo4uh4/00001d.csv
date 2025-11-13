@@ -1,0 +1,311 @@
+"0","# ========================================================================"
+"0","# 5. モデル構築"
+"0","# ========================================================================"
+"0",""
+"0","message(""\n[Step 5/7] Building models..."")"
+"2","
+[Step 5/7] Building models...
+"
+"0","message(""----------------------------------------"")"
+"2","----------------------------------------
+"
+"0","# 全モデル構築"
+"0","# ===== Step 1: time2yのゼロ値を修正 ====="
+"0","fix_zero_times <- function(data) {"
+"0","  if (""time2y"" %in% names(data)) {"
+"0","    zero_idx <- which(data$time2y <= 0)"
+"0","    if (length(zero_idx) > 0) {"
+"0","      data$time2y[zero_idx] <- 0.1"
+"0","      message(sprintf(""Fixed %d zero/negative time values"", length(zero_idx)))"
+"0","    }"
+"0","  }"
+"0","  return(data)"
+"0","}"
+"0",""
+"0","# すべてのデータセットに適用"
+"0","split_data_clean$train <- fix_zero_times(split_data_clean$train)"
+"0","split_data_clean$val <- fix_zero_times(split_data_clean$val)"
+"0","split_data_clean$test <- fix_zero_times(split_data_clean$test)"
+"0",""
+"0","# ===== Step 2: YAMLを再読み込み ====="
+"0","variables <- yaml::read_yaml(file.path(PROJECT_DIR, ""04_Script/config/variables.yaml""))"
+"0","config <- yaml::read_yaml(file.path(PROJECT_DIR, ""04_Script/config/settings.yaml""))"
+"0",""
+"0","# ===== Step 3: スクリプトを再読み込み ====="
+"0","source(file.path(PROJECT_DIR, ""04_Script/R/05_model_builder.R""))"
+"0",""
+"0","# ===== Step 4: モデル構築 ====="
+"0","USE_VARIABLE_SET <- ""postop_pathology_custom"""
+"0",""
+"0","models <- build_all_models("
+"0","  split_data = split_data_clean,"
+"0","  config = config,"
+"0","  variables = variables,"
+"0","  variable_set_name = USE_VARIABLE_SET"
+"0",")"
+"2","
+========================================
+"
+"2","Building All Models
+"
+"2","Using variable set: postop_pathology_custom
+"
+"2","========================================
+"
+"2","  Loaded 42 variables from 'postop_pathology_custom'
+"
+"2","
+📊 Preparing model data...
+"
+"2","
+🔧 Handling missing values...
+"
+"2","
+  Applying median imputation...
+"
+"2","
+  ⚠ Warning: 1 variables still have missing values:
+"
+"2","    - recur_date: 34.6% missing
+"
+"2","  Using 37 specified variables (missing: 5)
+"
+"2","  No rows removed (all data complete after imputation)
+"
+"2","  Final dataset: 567 rows × 37 variables
+"
+"2","
+--- Model: m1_stepaic_forward ---
+"
+"2","
+🔄 Building Stepwise Cox model (forward, AIC)...
+"
+"2","  Selected 18 variables: t, ALBIscore, afp_l3_log1p, sm1, fc_inf1
+"
+"2","    ... and 13 more
+"
+"2","
+--- Model: m2_stepaic_backward ---
+"
+"2","
+🔄 Building Stepwise Cox model (backward, AIC)...
+"
+"2","  Selected 19 variables: alb, child_pughB, child_pughC, liver_damageB, liver_damageC
+"
+"2","    ... and 14 more
+"
+"2","
+--- Model: m3_stepbic_forward ---
+"
+"2","
+🔄 Building Stepwise Cox model (forward, BIC)...
+"
+"2","  Selected 2 variables: t, ALBIscore
+"
+"2","
+--- Model: m4_stepbic_backward ---
+"
+"2","
+🔄 Building Stepwise Cox model (backward, BIC)...
+"
+"2","Warning: Loglik converged before variable  6 ; coefficient may be infinite. "
+"2","Warning: Loglik converged before variable  4 ; coefficient may be infinite. "
+"2","  Selected 4 variables: alb, ALBIscore, tbil_log1p, t
+"
+"2","
+--- Model: m5_univariate_screen ---
+"
+"2","
+🔍 Building Univariate Screening model (p<0.10)...
+"
+"2","  Selected 19 variables (p < 0.10):
+"
+"2","    t: p=0.0000, HR=2.00
+"
+"2","    stage_diagBR2: p=0.0000, HR=3.30
+"
+"2","    count: p=0.0000, HR=1.12
+"
+"2","    macroVITRUE: p=0.0000, HR=3.00
+"
+"2","    max_diam_cm: p=0.0000, HR=1.09
+"
+"2","
+--- Model: m6_rfe ---
+"
+"2","
+♻️ Building RFE Cox model...
+"
+"2","  Variables: 36, C-index: 0.720
+"
+"2","  Variables: 35, C-index: 0.720
+"
+"2","  Variables: 34, C-index: 0.720
+"
+"2","  Variables: 33, C-index: 0.720
+"
+"2","  Variables: 32, C-index: 0.720
+"
+"2","  Variables: 31, C-index: 0.720
+"
+"2","  Variables: 30, C-index: 0.720
+"
+"2","  Variables: 29, C-index: 0.720
+"
+"2","  Variables: 28, C-index: 0.720
+"
+"2","  Variables: 27, C-index: 0.719
+"
+"2","  Variables: 26, C-index: 0.718
+"
+"2","  Variables: 25, C-index: 0.718
+"
+"2","  Variables: 24, C-index: 0.718
+"
+"2","  Variables: 23, C-index: 0.718
+"
+"2","  Variables: 22, C-index: 0.717
+"
+"2","  Variables: 21, C-index: 0.717
+"
+"2","  Variables: 20, C-index: 0.718
+"
+"2","  Variables: 19, C-index: 0.716
+"
+"2","  Variables: 18, C-index: 0.712
+"
+"2","  Variables: 17, C-index: 0.713
+"
+"2","  Variables: 16, C-index: 0.712
+"
+"2","  Variables: 15, C-index: 0.712
+"
+"2","  Variables: 14, C-index: 0.711
+"
+"2","  Variables: 13, C-index: 0.708
+"
+"2","  Variables: 12, C-index: 0.709
+"
+"2","  Variables: 11, C-index: 0.707
+"
+"2","  Variables: 10, C-index: 0.707
+"
+"2","  Variables: 9, C-index: 0.704
+"
+"2","  Variables: 8, C-index: 0.706
+"
+"2","  Variables: 7, C-index: 0.701
+"
+"2","  Variables: 6, C-index: 0.700
+"
+"2","  Variables: 5, C-index: 0.699
+"
+"2","  Best model: 35 variables, C-index: 0.720
+"
+"2","  Selected: age, sex, alb, che, hbv
+"
+"2","    ... and 30 more
+"
+"2","
+--- Model: m7_lasso ---
+"
+"2","
+🎯 Building LASSO Cox model (alpha=1.0)...
+"
+"2","  Optimal lambda: 0.0673
+"
+"2","  Selected 7 variables: count, stage_diagBR2, ALBIscore, macroVITRUE, afp_l3_log1p
+"
+"2","    ... and 2 more
+"
+"2","
+--- Model: m7k_lasso_constrained ---
+"
+"2","
+🎯 Building constrained LASSO (target=4 vars)...
+"
+"2","  Selected 6 variables: count, stage_diagBR2, ALBIscore, macroVITRUE, afp_l3_log1p, t
+"
+"2","
+--- Model: m8_predefined ---
+"
+"2","
+📌 Building Pre-defined Cox model...
+"
+"2","  Warning: 1 predefined variables not found: im
+"
+"2","  Using 3 variables: stage_diag, t, ALBIscore
+"
+"2","
+📊 Model Building Summary:
+"
+"2","  m1_stepaic_forward: 18 variables
+"
+"2","  m2_stepaic_backward: 19 variables
+"
+"2","  m3_stepbic_forward: 2 variables
+"
+"2","  m4_stepbic_backward: 4 variables
+"
+"2","  m5_univariate_screen: 19 variables
+"
+"2","  m6_rfe: 35 variables
+"
+"2","  m7_lasso: 7 variables
+"
+"2","  m7k_lasso_constrained: 6 variables
+"
+"2","  m8_predefined: 3 variables
+"
+"2","
+✅ Model building completed!
+"
+"2","========================================
+
+"
+"0","# ===== Step 5: 結果確認 ====="
+"0","message(""\n=== Model Results ==="")"
+"2","
+=== Model Results ===
+"
+"0","for (model_name in names(models)) {"
+"0","  if (!is.null(models[[model_name]])) {"
+"0","    if (inherits(models[[model_name]], ""coxph"")) {"
+"0","      n_vars <- length(coef(models[[model_name]]))"
+"0","    } else {"
+"0","      n_vars <- length(attr(models[[model_name]], ""selected_vars""))"
+"0","    }"
+"0","    message(sprintf(""✓ %s: %d variables"", model_name, n_vars))"
+"0","  } else {"
+"0","    message(sprintf(""✗ %s: Failed"", model_name))"
+"0","  }"
+"0","}"
+"2","✓ m1_stepaic_forward: 18 variables
+"
+"2","✓ m2_stepaic_backward: 19 variables
+"
+"2","✓ m3_stepbic_forward: 2 variables
+"
+"2","✓ m4_stepbic_backward: 4 variables
+"
+"2","✓ m5_univariate_screen: 19 variables
+"
+"2","✓ m6_rfe: 35 variables
+"
+"2","✓ m7_lasso: 7 variables
+"
+"2","✓ m7k_lasso_constrained: 6 variables
+"
+"2","✓ m8_predefined: 4 variables
+"
+"0","# モデルの保存"
+"0","save_models(models, file.path(paths$output_models, ""all_models.rds""))"
+"2","  ✓ Models saved to: /Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/03_Output/models/all_models.rds
+"
+"0","# モデル数の確認"
+"0","n_successful <- sum(!sapply(models, is.null))"
+"0","message(sprintf(""\n  ✓ Successfully built %d/%d models"", "
+"0","               n_successful, length(models)))"
+"2","
+  ✓ Successfully built 9/9 models
+"

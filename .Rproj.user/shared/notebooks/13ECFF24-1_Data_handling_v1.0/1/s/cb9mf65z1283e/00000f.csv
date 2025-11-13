@@ -1,0 +1,8 @@
+"0","# ---- 3-4. Pretreatment tumor ----"
+"0","if (""治療前腫瘍径""   %in% names(ds01)) ds01$tum_diam_pre  <- suppressWarnings(as.numeric(ds01$`治療前腫瘍径`))"
+"0","if (""治療前腫瘍個数"" %in% names(ds01)) ds01$tum_count_pre <- suppressWarnings(as.numeric(ds01$`治療前腫瘍個数`))"
+"0","if (""治療前Vp"" %in% names(ds01)) ds01$vp_pre <- ds01$`治療前Vp`"
+"0","if (""治療前Vv"" %in% names(ds01)) ds01$vv_pre <- ds01$`治療前Vv`"
+"0","if (""治療前N""  %in% names(ds01)) ds01$n_pre  <- ds01$`治療前N`"
+"0","if (""治療前M""  %in% names(ds01)) ds01$m_pre  <- ds01$`治療前M`"
+"0",""

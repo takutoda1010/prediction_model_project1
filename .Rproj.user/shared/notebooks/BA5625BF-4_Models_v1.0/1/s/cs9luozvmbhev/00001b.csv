@@ -1,0 +1,16 @@
+"0","dev.off()"
+"1","null device "
+"1","
+"
+"1","          1 "
+"1","
+"
+"0","message(""✅ 書き出し完了：\n"","
+"0","        ""- "", file.path(out_dir, ""final_vars_by_model.csv""), ""\n"","
+"0","        ""- "", file.path(out_dir, ""model_summary.csv""), ""\n"","
+"0","        ""- "", file.path(out_dir, ""roc_curves_test_overlay.png""), "" / .pdf"")"
+"2","✅ 書き出し完了：
+- /Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/03_Output/final_vars_by_model.csv
+- /Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/03_Output/model_summary.csv
+- /Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/03_Output/roc_curves_test_overlay.png / .pdf
+"

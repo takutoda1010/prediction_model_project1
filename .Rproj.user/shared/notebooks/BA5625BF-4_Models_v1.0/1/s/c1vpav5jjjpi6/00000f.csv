@@ -1,0 +1,12 @@
+"0","# 24か月AUCに用いた T, Δ を明示して件数確認"
+"0","T_used <- if (""rfs_months"" %in% names(tst)) tst$rfs_months else tst$time2y"
+"0","Delta  <- if (""rfs_event"" %in% names(tst)) as.integer(tst$rfs_event==1) else tst$event2y"
+"0",""
+"0","cases_24    <- sum(T_used <= 24 & Delta == 1, na.rm = TRUE)"
+"0","controls_24 <- sum(T_used >  24,               na.rm = TRUE)"
+"0","cens_0_24   <- sum(T_used <= 24 & Delta == 0,  na.rm = TRUE)"
+"0",""
+"0","cat(sprintf(""For AUC@24: cases=%d, controls=%d, censored_before=%d\n"","
+"0","            cases_24, controls_24, cens_0_24))"
+"1","For AUC@24: cases=63, controls=60, censored_before=73
+"

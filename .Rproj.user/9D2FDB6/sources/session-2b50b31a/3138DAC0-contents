@@ -1,0 +1,639 @@
+---
+title: "1_Data_Handling_v1.1"
+author: "Takuto Yoshida"
+date: "2025-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+################################################################################
+# HCC再発予測モデル - データハンドリング
+# Version: 2.0
+# Description: Borderline HCC生存解析データの前処理と変数作成
+################################################################################
+
+# ========================================================================
+# 1. 環境設定とパッケージ読み込み
+# ========================================================================
+
+# 必要パッケージの自動インストール・読み込み関数
+ensure_packages <- function(pkgs) {
+  to_install <- setdiff(pkgs, rownames(installed.packages()))
+  if (length(to_install)) {
+    install.packages(to_install)
+  }
+  invisible(lapply(pkgs, require, character.only = TRUE))
+}
+
+# パッケージ読み込み
+required_packages <- c(
+  "readxl", "readr", "tidylog", "dplyr", "stringr", 
+  "forcats", "lubridate", "DataExplorer", "tibble"
+)
+ensure_packages(required_packages)
+```
+
+```{r}
+# ========================================================================
+# 2. ヘルパー関数定義
+# ========================================================================
+
+#' Excel日付・日時混在データをDate型に変換
+#' @param x 変換対象のベクトル
+#' @return Date型ベクトル
+to_date_excel_mixed <- function(x) {
+  if (inherits(x, "Date")) return(x)
+  
+  s <- trimws(as.character(x))
+  s[s %in% c("", "NA", "N/A", "na", "n/a")] <- NA
+  
+  # Excelシリアル値（1900年起算）の処理
+  num <- suppressWarnings(as.numeric(s))
+  dnum <- as.Date(num, origin = "1899-12-30")
+  
+  # 文字列日付の正規化
+  s2 <- s |>
+    stringr::str_replace_all("[.]", "/") |>
+    stringr::str_replace_all("年|月", "/") |>
+    stringr::str_replace_all("日", "") |>
+    stringr::str_replace_all("/", "-")
+  
+  dchr <- suppressWarnings(lubridate::ymd(s2))
+  
+  # 文字列日付を優先、次にシリアル値
+  as.Date(dplyr::coalesce(dchr, dnum))
+}
+
+#' TRUE/FALSE表記の揺れを論理値に変換
+#' @param x 変換対象のベクトル
+#' @return logical型ベクトル
+to_tf <- function(x) {
+  z <- trimws(as.character(x))
+  z <- chartr("＋－", "+-", z)
+  
+  rec <- c(
+    "TRUE" = "TRUE", "T" = "TRUE", "有" = "TRUE", "Yes" = "TRUE", 
+    "yes" = "TRUE", "1" = "TRUE", "+" = "TRUE",
+    "FALSE" = "FALSE", "F" = "FALSE", "無" = "FALSE", "No" = "FALSE", 
+    "no" = "FALSE", "0" = "FALSE", "-" = "FALSE"
+  )
+  
+  as.logical(rec[z])
+}
+
+#' 時間表記を分に変換（H:MM:SS形式とExcel小数値に対応）
+#' @param x 変換対象のベクトル
+#' @return 分単位の数値ベクトル
+to_minutes_from_time <- function(x) {
+  s <- stringr::str_squish(as.character(x))
+  s <- stringr::str_replace_all(s, "：", ":")
+  
+  has_colon <- stringr::str_detect(s, ":")
+  
+  # コロン形式の処理
+  parts <- stringr::str_split_fixed(s, ":", 3)
+  hh <- suppressWarnings(as.numeric(parts[, 1]))
+  mm <- suppressWarnings(as.numeric(parts[, 2]))
+  ss <- suppressWarnings(as.numeric(parts[, 3]))
+  
+  from_colon <- ifelse(
+    has_colon, 
+    hh * 60 + mm + ifelse(is.na(ss), 0, round(ss / 60)), 
+    NA_real_
+  )
+  
+  # Excel小数値の処理（1日 = 1.0）
+  num <- suppressWarnings(as.numeric(s))
+  from_frac <- ifelse(!has_colon & !is.na(num), num * 1440, NA_real_)
+  
+  round(dplyr::coalesce(from_colon, from_frac))
+}
+```
+
+```{r}
+# ========================================================================
+# 3. データ読み込みと前処理
+# ========================================================================
+
+#' データファイルの読み込みと基本的な前処理
+#' @param file_path Excelファイルのパス
+#' @return 前処理済みデータフレーム
+load_and_preprocess <- function(file_path) {
+  # Excelファイル読み込み
+  ds_raw <- suppressWarnings(
+    readxl::read_excel(file_path, sheet = 1, guess_max = 100000)
+  )
+  
+  # 型推論の再実行
+  ds <- readr::type_convert(ds_raw, locale = readr::locale(encoding = "UTF-8"))
+  
+  # 列名の正規化（全角・連続スペースを半角1つに）
+  names(ds) <- names(ds) |>
+    stringr::str_replace_all("[\u3000\\s]+", " ") |>
+    trimws()
+  
+  # 基本的な列名統一
+  if ("Group" %in% names(ds)) {
+    ds <- dplyr::rename(ds, group = Group)
+  }
+  
+  return(ds)
+}
+```
+
+```{r}
+# ========================================================================
+# 4. 変数マッピング定義
+# ========================================================================
+
+# 列名のエイリアス定義（短縮名→正式名）
+COLUMN_ALIASES <- list(
+  "再発有無" = "再発有無TRUE/FALSEの二群",
+  "StageI+II or III+IV" = "StageI+II or III+IV　非癌部肝(旧入力）",
+  "合併症胸水" = "合併症胸水 0-2の順序変数",
+  "合併症出血" = "合併症出血 0-2の順序変数",
+  "合併症胆汁漏" = "合併症胆汁漏順序変数",
+  "合併症消化管" = "合併症消化管順序変数",
+  "合併症術創" = "合併症術創順序変数"
+)
+
+# 変数マッピング定義
+VARIABLE_MAPPING <- list(
+  # 基本情報
+  basic = list(
+    "ID...3" = list(name = "id", type = "character"),
+    "Num" = list(name = "num", type = "numeric")
+  ),
+  
+  # 日付・生存データ
+  dates_survival = list(
+    "date of birth" = list(name = "dob", type = "date"),
+    "最終確認日" = list(name = "last_followup", type = "date"),
+    "初診日" = list(name = "first_visit_dt", type = "date"),
+    "入院日" = list(name = "adm_dt", type = "date"),
+    "再発日" = list(name = "recur_date", type = "date"),
+    "手術日" = list(name = "op_date", type = "date"),
+    "年齢" = list(name = "age", type = "numeric"),
+    "60未満、60以上" = list(name = "age_grp60", type = "factor"),
+    "性別" = list(name = "sex", type = "factor"),
+    "全生存期間m" = list(name = "os_months", type = "numeric"),
+    "生死" = list(name = "vital_status", type = "factor"),
+    "生1死0" = list(name = "vital10", type = "factor"),
+    "再発有無TRUE/FALSEの二群" = list(name = "recur_tf", type = "logical"),
+    "無再発生存期間" = list(name = "rfs_months", type = "numeric"),
+    "再発or死0" = list(name = "eventfree10", type = "factor")
+  ),
+  
+  # 治療前パラメータ
+  pretreatment = list(
+    "治療前腫瘍径" = list(name = "tum_diam_pre", type = "numeric"),
+    "治療前腫瘍個数" = list(name = "tum_count_pre", type = "numeric"),
+    "治療前Vp" = list(name = "vp_pre", type = "factor"),
+    "治療前Vv" = list(name = "vv_pre", type = "factor"),
+    "治療前N" = list(name = "n_pre", type = "factor"),
+    "治療前M" = list(name = "m_pre", type = "factor")
+  ),
+  
+  # 検査値
+  laboratory = list(
+    "Plt" = list(name = "plt", type = "numeric"),
+    "Alb" = list(name = "alb", type = "numeric"),
+    "Bil" = list(name = "tbil", type = "numeric"),
+    "ChE" = list(name = "che", type = "numeric"),
+    "GOT" = list(name = "ast", type = "numeric"),
+    "GPT" = list(name = "alt", type = "numeric"),
+    "AMN" = list(name = "nh3", type = "numeric"),
+    "PT" = list(name = "pt_inr", type = "numeric"),
+    "HB" = list(name = "hbv", type = "factor"),
+    "HB感染既往" = list(name = "hbv_past", type = "factor"),
+    "HCV" = list(name = "hcv", type = "factor"),
+    "ICG 10%未満" = list(name = "icg10_cat", type = "factor"),
+    "ICG" = list(name = "icg_r15", type = "numeric"),
+    "HH15" = list(name = "hh15", type = "numeric"),
+    "LHL15" = list(name = "lhl15", type = "numeric"),
+    "liver_damage" = list(name = "liver_damage", type = "factor"),
+    "ChildPugh" = list(name = "child_pugh", type = "factor")
+  ),
+  
+  # 腫瘍マーカー
+  markers = list(
+    "AFP500以上" = list(name = "afp500_cat", type = "factor"),
+    "AFP" = list(name = "afp", type = "numeric"),
+    "AFP_L3" = list(name = "afp_l3", type = "numeric"),
+    "PIVKA2 200以上" = list(name = "pivka200_cat", type = "factor"),
+    "PIVKA2" = list(name = "pivka2", type = "numeric"),
+    "CEA" = list(name = "cea", type = "numeric"),
+    "CA199" = list(name = "ca19_9", type = "numeric")
+  ),
+  
+  # 身体所見
+  physical = list(
+    "身長" = list(name = "height_cm", type = "numeric"),
+    "体重" = list(name = "weight_kg", type = "numeric"),
+    "PS" = list(name = "ps", type = "factor"),
+    "ASA" = list(name = "asa", type = "factor")
+  ),
+  
+  # 体積測定
+  volumes = list(
+    "全肝容積" = list(name = "liver_vol", type = "numeric"),
+    "腫瘍容積" = list(name = "tumor_vol", type = "numeric"),
+    "残肝容積" = list(name = "remnant_vol", type = "numeric"),
+    "有効肝切率" = list(name = "func_resect_rate", type = "numeric"),
+    "PTPE" = list(name = "ptpe", type = "logical"),
+    "前肝容積" = list(name = "pre_liver_vol", type = "numeric"),
+    "前腫瘍容積" = list(name = "pre_tumor_vol", type = "numeric"),
+    "前残肝容積" = list(name = "pre_remnant_vol", type = "numeric"),
+    "術前機能的肝切除率" = list(name = "pre_func_rate", type = "numeric"),
+    "2W肝容積" = list(name = "w2_liver_vol", type = "numeric"),
+    "2W腫瘍容積" = list(name = "w2_tumor_vol", type = "numeric"),
+    "2W機能的肝切除率" = list(name = "w2_func_rate", type = "numeric")
+  ),
+  
+  # 手術関連
+  operation = list(
+    "手術病名" = list(name = "op_dx_txt", type = "character"),
+    "術式" = list(name = "op_proc_txt", type = "character"),
+    "術式分類" = list(name = "op_proc_cat", type = "factor"),
+    "手術時間" = list(name = "op_time_min", type = "time_minutes"),
+    "出血量" = list(name = "bleed_ml", type = "numeric"),
+    "術者" = list(name = "surgeon_name", type = "character"),
+    "Pringle" = list(name = "pringle", type = "factor"),
+    "開胸開腹" = list(name = "thoraco_lap", type = "logical"),
+    "切除肝重量" = list(name = "specimen_wt", type = "numeric"),
+    "肝再切除" = list(name = "rehepatectomy", type = "logical"),
+    "腹腔鏡の使用" = list(name = "laparoscopy_use", type = "factor"),
+    "切除治療時治癒度" = list(name = "curability", type = "factor")
+  ),
+  
+  # 病理所見
+  pathology = list(
+    "最大径5以下、5~10、10以上" = list(name = "max_diam_cat", type = "factor"),
+    "最大径" = list(name = "max_diam_cm", type = "numeric"),
+    "単発or2~3" = list(name = "uni_vs_2to3", type = "factor"),
+    "vp" = list(name = "vp_path", type = "factor"),
+    "vv" = list(name = "vv_path", type = "factor"),
+    "va" = list(name = "va_path", type = "factor"),
+    "b" = list(name = "b_path", type = "factor"),
+    "発育" = list(name = "growth_type", type = "factor"),
+    "fc" = list(name = "fc", type = "factor"),
+    "fc_inf" = list(name = "fc_inf", type = "factor"),
+    "sf" = list(name = "sf", type = "factor"),
+    "sm" = list(name = "sm", type = "factor"),
+    "im" = list(name = "im", type = "factor"),
+    "t" = list(name = "t", type = "factor"),
+    "n" = list(name = "n", type = "factor"),
+    "m" = list(name = "m", type = "factor"),
+    "stage" = list(name = "stage", type = "factor"),
+    "分化度(旧入力）" = list(name = "grade_old", type = "factor"),
+    "分化度" = list(name = "grade_txt", type = "character"),
+    "個数" = list(name = "count", type = "numeric"),
+    "組織型" = list(name = "histology_txt", type = "character"),
+    "sm_mm" = list(name = "sm_mm", type = "numeric"),
+    "fibrosis score(旧入力）" = list(name = "fibrosis_score_old", type = "factor"),
+    "fibrosis score" = list(name = "fibrosis_score", type = "factor"),
+    "grading score(旧入力）" = list(name = "grading_score_old", type = "factor"),
+    "grading score" = list(name = "grading_score", type = "factor")
+  ),
+  
+  # 術後合併症
+  complications = list(
+    "術後TBil値" = list(name = "tbil_post_grade", type = "factor"),
+    "術後アンモニア値" = list(name = "nh3_post_grade", type = "factor"),
+    "術後肝不全" = list(name = "pofil", type = "factor"),
+    "術後合併症" = list(name = "comp_any_grade", type = "factor"),
+    "合併症胸水 0-2の順序変数" = list(name = "comp_pleural", type = "factor"),
+    "合併症呼吸器" = list(name = "comp_resp", type = "factor"),
+    "合併症出血 0-2の順序変数" = list(name = "comp_bleeding", type = "factor"),
+    "合併症腹水" = list(name = "comp_ascites", type = "factor"),
+    "合併症胆汁漏順序変数" = list(name = "comp_bile", type = "factor"),
+    "合併症消化管順序変数" = list(name = "comp_gi", type = "factor"),
+    "合併症術創順序変数" = list(name = "comp_wound", type = "factor"),
+    "合併症" = list(name = "comp_txt", type = "character")
+  )
+)
+```
+
+```{r}
+# ========================================================================
+# 5. 変数変換関数
+# ========================================================================
+
+#' 列名のエイリアスを適用
+apply_column_aliases <- function(data) {
+  for (old_name in names(COLUMN_ALIASES)) {
+    new_name <- COLUMN_ALIASES[[old_name]]
+    if (old_name %in% names(data) && !new_name %in% names(data)) {
+      data <- dplyr::rename(data, !!new_name := !!old_name)
+    }
+  }
+  return(data)
+}
+
+#' マッピングに基づいて変数を作成
+apply_variable_mapping <- function(data) {
+  # すべてのマッピングカテゴリを処理
+  all_mappings <- unlist(VARIABLE_MAPPING, recursive = FALSE)
+  
+  for (orig_col in names(all_mappings)) {
+    if (orig_col %in% names(data)) {
+      mapping <- all_mappings[[orig_col]]
+      new_col <- mapping$name
+      col_type <- mapping$type
+      
+      # 型に応じた変換
+      if (col_type == "numeric") {
+        data[[new_col]] <- suppressWarnings(as.numeric(data[[orig_col]]))
+      } else if (col_type == "character") {
+        data[[new_col]] <- as.character(data[[orig_col]])
+      } else if (col_type == "factor") {
+        data[[new_col]] <- as.factor(data[[orig_col]])
+      } else if (col_type == "date") {
+        data[[new_col]] <- to_date_excel_mixed(data[[orig_col]])
+      } else if (col_type == "logical") {
+        data[[new_col]] <- to_tf(data[[orig_col]])
+      } else if (col_type == "time_minutes") {
+        data[[new_col]] <- to_minutes_from_time(data[[orig_col]])
+      }
+    }
+  }
+  
+  return(data)
+}
+
+#' 群分けステージ変数を作成
+create_stage_variables <- function(data) {
+  # 手術時群分け
+  c_surg <- grep("手術時群分け\\s*R\\s*/\\s*BR1\\s*/\\s*BR2", 
+                 names(data), value = TRUE, perl = TRUE)
+  if (length(c_surg)) {
+    data$stage_surg <- factor(data[[c_surg[1]]], levels = c("R", "BR1", "BR2"))
+  }
+  
+  # 診断時群分け
+  c_diag <- grep("診断時群分け\\s*R\\s*/\\s*BR1\\s*/\\s*BR2", 
+                 names(data), value = TRUE, perl = TRUE)
+  if (length(c_diag)) {
+    data$stage_diag <- factor(data[[c_diag[1]]], levels = c("R", "BR1", "BR2"))
+  }
+  
+  # R/BR群分け（BR1とBR2をBRに統合）
+  c_rb <- grep("^群分け\\s*R\\s*/\\s*BR", names(data), value = TRUE, perl = TRUE)
+  if (length(c_rb)) {
+    x <- stringr::str_squish(as.character(data[[c_rb[1]]]))
+    x <- ifelse(x %in% c("BR1", "BR2"), "BR", x)
+    data$group_rb <- factor(x, levels = c("R", "BR"))
+  } else if ("stage_surg" %in% names(data)) {
+    x <- as.character(data$stage_surg)
+    x[x %in% c("BR1", "BR2")] <- "BR"
+    data$group_rb <- factor(x, levels = c("R", "BR"))
+  } else if ("stage_diag" %in% names(data)) {
+    x <- as.character(data$stage_diag)
+    x[x %in% c("BR1", "BR2")] <- "BR"
+    data$group_rb <- factor(x, levels = c("R", "BR"))
+  }
+  
+  # 非癌部肝ステージ（旧）
+  cand_nc <- intersect(names(data), 
+                       c("StageI+II or III+IV　非癌部肝(旧入力）", 
+                         "StageI+II or III+IV"))
+  if (length(cand_nc) >= 1) {
+    data$nc_liver_stage_old <- data[[cand_nc[1]]]
+  }
+  
+  return(data)
+}
+
+#' 死因カテゴリを作成
+create_death_cause <- function(data) {
+  if ("死因" %in% names(data)) {
+    y <- stringr::str_squish(as.character(data$`死因`))
+    other_pat <- "(他病死(（老衰）|\\(老衰\\))?|敗血症|死（原因不明）|死\\(原因不明\\))"
+    
+    data$death_cause4 <- dplyr::case_when(
+      is.na(y) | y == "" ~ "aliver",
+      stringr::str_detect(y, "癌") ~ "Cancer",
+      stringr::str_detect(y, "肝不全") ~ "LiverFailure",
+      stringr::str_detect(y, other_pat) ~ "Other",
+      TRUE ~ "Other"
+    ) |> 
+      factor(levels = c("aliver", "Cancer", "LiverFailure", "Other"))
+  }
+  
+  return(data)
+}
+```
+
+```{r}
+
+# ========================================================================
+# 6. 最終出力変数の選択
+# ========================================================================
+
+#' 解析用データセットの作成
+create_model_dataset <- function(data) {
+  # 必要な列を定義
+  selected_columns <- c(
+    # 識別子
+    "id", "num", "group",
+    
+    # ステージ分類
+    "stage_surg", "stage_diag", "group_rb", "nc_liver_stage_old",
+    
+    # 治療前パラメータ
+    "tum_diam_pre", "tum_count_pre", "vp_pre", "vv_pre", "n_pre", "m_pre",
+    
+    # 患者背景・生存データ
+    "dob", "age", "age_grp60", "sex", "last_followup", "os_months", 
+    "vital_status", "vital10", "death_cause4", "recur_date", 
+    "rfs_months", "recur_tf", "eventfree10", "first_visit_dt", "adm_dt",
+    
+    # 検査値
+    "hbv", "hbv_past", "hcv", "plt", "alb", "tbil", "che", 
+    "ast", "alt", "nh3", "pt_inr", "icg10_cat", "icg_r15", 
+    "hh15", "lhl15", "liver_damage", "child_pugh",
+    
+    # 腫瘍マーカー
+    "afp500_cat", "afp", "afp_l3", "pivka200_cat", "pivka2", "cea", "ca19_9",
+    
+    # 身体所見
+    "height_cm", "weight_kg", "ps", "asa",
+    
+    # 体積測定
+    "liver_vol", "tumor_vol", "remnant_vol", "func_resect_rate", "ptpe",
+    "pre_liver_vol", "pre_tumor_vol", "pre_remnant_vol", "pre_func_rate",
+    "w2_liver_vol", "w2_tumor_vol", "w2_func_rate",
+    
+    # 手術関連
+    "op_date", "op_dx_txt", "op_proc_txt", "op_proc_cat", "op_time_min",
+    "bleed_ml", "surgeon_name", "pringle", "thoraco_lap", "specimen_wt",
+    "rehepatectomy", "laparoscopy_use", "curability",
+    
+    # 病理所見
+    "max_diam_cat", "max_diam_cm", "grade_old", "grade_txt", "uni_vs_2to3",
+    "growth_type", "vp_path", "vv_path", "va_path", "b_path", 
+    "fc", "fc_inf", "sf", "im", "sm", "sm_mm", "t", "n", "m", "stage",
+    "count", "histology_txt", "fibrosis_score_old", "fibrosis_score",
+    "grading_score_old", "grading_score",
+    
+    # 術後合併症
+    "tbil_post_grade", "nh3_post_grade", "pofil", "comp_any_grade",
+    "comp_pleural", "comp_resp", "comp_bleeding", "comp_ascites",
+    "comp_bile", "comp_gi", "comp_wound", "comp_txt"
+  )
+  
+  # 存在する列のみ選択
+  existing_cols <- intersect(selected_columns, names(data))
+  missing_cols <- setdiff(selected_columns, names(data))
+  
+  if (length(missing_cols) > 0) {
+    message("以下の列が見つかりません: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  model_data <- data |> dplyr::select(all_of(existing_cols))
+  
+  return(model_data)
+}
+```
+
+```{r}
+
+# ========================================================================
+# 7. メイン処理
+# ========================================================================
+
+#' メインのデータ処理パイプライン
+#' @param file_path 入力Excelファイルのパス
+#' @return 処理済みデータのリスト
+process_hcc_data <- function(file_path) {
+  
+  message("========================================")
+  message("HCCデータ処理開始")
+  message("========================================")
+  
+  # Step 1: データ読み込み
+  message("Step 1: データ読み込み...")
+  ds_raw <- load_and_preprocess(file_path)
+  n_rows_original <- nrow(ds_raw)
+  message(sprintf("  読み込み完了: %d行", n_rows_original))
+  
+  # Step 2: 列名のエイリアス適用
+  message("Step 2: 列名の統一...")
+  ds_aliased <- apply_column_aliases(ds_raw)
+  
+  # Step 3: 変数マッピング適用
+  message("Step 3: 変数変換...")
+  ds_mapped <- apply_variable_mapping(ds_aliased)
+  
+  # Step 4: 派生変数作成
+  message("Step 4: 派生変数作成...")
+  ds_with_stages <- create_stage_variables(ds_mapped)
+  ds_with_death <- create_death_cause(ds_with_stages)
+  
+  # Step 5: モデル用データセット作成
+  message("Step 5: モデル用データセット作成...")
+  ds_model <- create_model_dataset(ds_with_death)
+  
+  # 結果確認
+  n_rows_final <- nrow(ds_model)
+  n_cols_final <- ncol(ds_model)
+  
+  message("========================================")
+  message("処理完了")
+  message(sprintf("  最終データ: %d行 × %d列", n_rows_final, n_cols_final))
+  
+  if (n_rows_original != n_rows_final) {
+    warning(sprintf("行数が変化しました: %d → %d", n_rows_original, n_rows_final))
+  }
+  
+  # 結果を返す
+  return(list(
+    raw_data = ds_raw,          # 元データ
+    processed_data = ds_with_death,  # 全処理済みデータ
+    model_data = ds_model,      # モデル用データ
+    metadata = list(
+      n_rows_original = n_rows_original,
+      n_rows_final = n_rows_final,
+      n_cols_final = n_cols_final,
+      processing_date = Sys.Date()
+    )
+  ))
+}
+```
+
+```{r}
+# ========================================================================
+# 8. データ品質チェック関数
+# ========================================================================
+
+#' データ品質のサマリーレポート作成
+#' @param data チェック対象のデータフレーム
+print_data_summary <- function(data) {
+  cat("\n==== データサマリー ====\n")
+  cat(sprintf("行数: %d\n", nrow(data)))
+  cat(sprintf("列数: %d\n", ncol(data)))
+  
+  # 欠損値の概要
+  missing_summary <- data |>
+    summarise(across(everything(), ~sum(is.na(.x)))) |>
+    tidyr::pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
+    filter(n_missing > 0) |>
+    arrange(desc(n_missing))
+  
+  if (nrow(missing_summary) > 0) {
+    cat("\n欠損値の多い変数 (上位10):\n")
+    print(head(missing_summary, 10))
+  }
+  
+  # 主要変数の分布
+  cat("\n主要アウトカムの分布:\n")
+  if ("vital_status" %in% names(data)) {
+    print(table(data$vital_status, useNA = "ifany"))
+  }
+  if ("recur_tf" %in% names(data)) {
+    cat("\n再発:\n")
+    print(table(data$recur_tf, useNA = "ifany"))
+  }
+  if ("group_rb" %in% names(data)) {
+    cat("\n群分け:\n")
+    print(table(data$group_rb, useNA = "ifany"))
+  }
+}
+```
+
+```{r}
+# ========================================================================
+# 9. 実行例
+# ========================================================================
+
+# 使用例（コメントアウト済み）
+# file_path <- '/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/01_Data/BR分類で生存解析のデータupdate20251016.xlsx'
+# 
+# # データ処理実行
+# result <- process_hcc_data(file_path)
+# 
+# # 結果の取り出し
+# ds_model <- result$model_data
+# ds_full <- result$processed_data
+# 
+# # データサマリー表示
+# print_data_summary(ds_model)
+# 
+# # 可視化（必要に応じて）
+# # DataExplorer::plot_missing(ds_model)
+# # DataExplorer::plot_bar(ds_model)
+# # DataExplorer::plot_histogram(ds_model)
+
+################################################################################
+# END OF SCRIPT
+################################################################################
+
+
+```
+

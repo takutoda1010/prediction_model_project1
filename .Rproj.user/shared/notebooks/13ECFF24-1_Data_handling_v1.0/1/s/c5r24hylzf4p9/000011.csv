@@ -1,0 +1,48 @@
+"0","# ---- 3-1. Import & priming ----"
+"0",""
+"0","# 読み込み（列型はreadxlに任せる → 後段で必要な列だけ整形）"
+"0","ds00_raw <- suppressWarnings(readxl::read_excel('/Users/yoshidatakuto/Dropbox/Hokkaido University/大学院医学院/Borderline HCC/Prediction model_Project1/01_Data/BR分類で生存解析のデータupdate20251016.xlsx', sheet = 1, guess_max = 100000))"
+"2","New names:"
+"0","ds00     <- readr::type_convert(ds00_raw, locale = readr::locale(encoding = ""UTF-8""))"
+"2","
+[36m──[39m [1mColumn specification[22m [36m───────────────────────────────────────────────────────────────────────────────────────[39m
+cols(
+  .default = col_character(),
+  ID...3 = [32mcol_double()[39m,
+  治療前Vp = [32mcol_double()[39m,
+  治療前Vv = [32mcol_double()[39m,
+  治療前B = [32mcol_double()[39m,
+  治療前N = [32mcol_double()[39m,
+  治療前M = [32mcol_double()[39m,
+  ID...32 = [32mcol_double()[39m,
+  再発有無 = [33mcol_logical()[39m,
+  PTPE = [33mcol_logical()[39m,
+  肝再切除 = [33mcol_logical()[39m,
+  Hx = [33mcol_logical()[39m,
+  RecHx = [33mcol_logical()[39m,
+  vp = [32mcol_double()[39m,
+  vv = [32mcol_double()[39m,
+  va = [32mcol_double()[39m,
+  b = [32mcol_double()[39m,
+  t = [32mcol_double()[39m,
+  n = [32mcol_double()[39m,
+  m = [32mcol_double()[39m
+)
+[36mℹ[39m Use `spec()` for the full column specifications.
+"
+"0","# 参照レベルは触らない前提：ds01 = コピー"
+"0","ds01 <- ds00"
+"0",""
+"0","# 列名の空白ゆらぎを最小限整形（全角/連続スペースを半角1つへ）"
+"0","names(ds01) <- names(ds01) |>"
+"0","  stringr::str_replace_all(""[\u3000\\s]+"", "" "") |>"
+"0","  trimws()"
+"0",""
+"0","# Group → group（値はそのまま）"
+"0","if (""Group"" %in% names(ds00)) ds00 <- dplyr::rename(ds00, group = Group)"
+"0","if (""group"" %in% names(ds00)) ds01$group <- ds00$group"
+"0",""
+"0","# よく使う別名（ID...3 → id, Num → num 等）：値はそのまま"
+"0","if (""ID...3"" %in% names(ds01)) ds01$id  <- as.character(ds01$`ID...3`)"
+"0","if (""Num""    %in% names(ds01)) ds01$num <- ds01$Num"
+"0",""

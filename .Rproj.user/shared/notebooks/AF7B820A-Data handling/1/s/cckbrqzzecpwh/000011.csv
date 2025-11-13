@@ -1,0 +1,21 @@
+"0","# 件数は揃っているか"
+"0","c(n_ds00 = nrow(ds00), n_ds01 = nrow(ds01), n_ds01_model = nrow(ds01_model))"
+"1","      n_ds00 "
+"1","      n_ds01 "
+"1","n_ds01_model "
+"1","
+"
+"1","         990 "
+"1","         990 "
+"1","         990 "
+"1","
+"
+"0","# 代表列の NA の扱い（温存されていること）"
+"0","sapply(ds01_model[, c(""afp_l3"",""pivka200_cat"",""tum_diam_pre"",""recur_date"")], function(x) sum(is.na(x)))"
+"1","[1m[33mError[39m in `ds01_model[, c(""afp_l3"", ""pivka200_cat"", ""tum_diam_pre"", ""recur_date"")]`:[22m
+[33m![39m Can't subset columns that don't exist.
+[31m✖[39m Columns `afp_l3` and `pivka200_cat` don't exist.
+Backtrace:
+[90m 1. [39m[1mbase[22m::sapply(...)
+[90m 4. [39m[1m[94mtibble:::`[.tbl_df`([39m[22mds01_model, , c(""afp_l3"", ""pivka200_cat"", ""tum_diam_pre"", ""recur_date"")[1m[94m)[39m[22m
+"

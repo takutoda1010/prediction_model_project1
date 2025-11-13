@@ -1,0 +1,3 @@
+"0","# （任意）各点に n を表示したい場合："
+"0","# text(agg$pred, agg$obs, labels = agg$n, pos = 3, cex = 0.8)"
+"0",""

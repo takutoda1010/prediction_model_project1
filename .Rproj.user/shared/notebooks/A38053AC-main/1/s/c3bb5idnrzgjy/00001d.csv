@@ -1,0 +1,9 @@
+"2","
+✅ Successfully evaluated 9/9 models
+"
+"0","# グローバル変数として保存"
+"0","evaluation_results <- eval_results_fixed"
+"0","message(""\n💾 Results saved as 'evaluation_results'"")"
+"2","
+💾 Results saved as 'evaluation_results'
+"

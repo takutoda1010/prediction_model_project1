@@ -1,0 +1,1 @@
+"0","ds00 %>% dplyr::select(`初診日`,`入院日`,Plt,Alb,Bil,ChE,GOT,GPT,AMN,PT) %>% head(3)"

@@ -1,0 +1,4 @@
+"0","cat(""\n候補（左裾重 top 10）:\n"");  print(head(left_skew, 10),  row.names = FALSE)"
+"1","
+候補（左裾重 top 10）:
+"

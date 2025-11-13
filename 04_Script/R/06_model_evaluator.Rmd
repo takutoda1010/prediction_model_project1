@@ -1,0 +1,1068 @@
+---
+title: "06_Model_evaluator"
+author: "Takuto Yoshida"
+date: "2025-11-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+################################################################################
+# 06_model_evaluator.R - モデル評価処理
+# 
+# Description: 
+#   モデル性能の包括的評価
+#   C-index, 時間依存AUC, キャリブレーション, DCA, Brier Score
+#   競合リスク評価
+#
+# Author: Takuto Yoshida
+# Date: 2024-11-07
+################################################################################
+
+# ========================================================================
+# 1. 予測値の計算
+# ========================================================================
+
+#' モデルから予測値を取得
+#' @param model モデルオブジェクト
+#' @param newdata 予測用データ
+#' @param time_point 予測時点（月）
+#' @return 予測確率
+get_predictions <- function(model, newdata, time_point = 24) {
+  
+  # モデルタイプの判定
+  model_class <- class(model)[1]
+  
+  if (model_class == "coxph") {
+    # 通常のCoxモデル
+    
+    # 線形予測子
+    lp <- predict(model, newdata = newdata, type = "lp")
+    
+    # ベースライン生存関数の取得を簡略化
+    # survfitではなく、basehazを使用
+    basehaz_df <- basehaz(model, centered = FALSE)
+    
+    # 指定時点に最も近い時間を見つける
+    time_idx <- which.min(abs(basehaz_df$time - time_point))
+    cum_hazard_at_time <- basehaz_df$hazard[time_idx]
+    
+    # 予測確率（イベント確率）
+    # S(t) = exp(-H0(t) * exp(lp))
+    # P(event) = 1 - S(t)
+    pred_prob <- 1 - exp(-cum_hazard_at_time * exp(lp))
+    
+  } else if (model_class == "lasso_cox") {
+    # LASSOモデル（既存のコード）
+    X_new <- model.matrix(~ . - 1, 
+                         data = newdata[, colnames(model$X), drop = FALSE])
+    lp <- predict(model$glmnet_model, newx = X_new, s = model$lambda_min, type = "link")
+    pred_prob <- 1 - exp(-exp(lp) * time_point / 12)  # 単純化
+    
+  } else if (model_class == "univariate_cox") {
+    # 単変量スクリーニングモデル
+    if (!is.null(model$model)) {
+      lp <- predict(model$model, newdata = newdata, type = "lp")
+      basehaz_df <- basehaz(model$model, centered = FALSE)
+      time_idx <- which.min(abs(basehaz_df$time - time_point))
+      cum_hazard_at_time <- basehaz_df$hazard[time_idx]
+      pred_prob <- 1 - exp(-cum_hazard_at_time * exp(lp))
+    } else {
+      pred_prob <- rep(NA, nrow(newdata))
+    }
+    
+  } else if (model_class == "rfe_cox") {
+    # RFEモデル
+    if (!is.null(model$model)) {
+      lp <- predict(model$model, newdata = newdata, type = "lp")
+      basehaz_df <- basehaz(model$model, centered = FALSE)
+      time_idx <- which.min(abs(basehaz_df$time - time_point))
+      cum_hazard_at_time <- basehaz_df$hazard[time_idx]
+      pred_prob <- 1 - exp(-cum_hazard_at_time * exp(lp))
+    } else {
+      pred_prob <- rep(NA, nrow(newdata))
+    }
+    
+  } else {
+    warning(sprintf("Unknown model class: %s", model_class))
+    pred_prob <- rep(NA, nrow(newdata))
+  }
+  
+  return(as.numeric(pred_prob))
+}
+
+# ========================================================================
+# 2. C-index計算
+# ========================================================================
+
+#' C-indexを計算
+#' @param model モデルオブジェクト
+#' @param data 評価用データ（surv_obj列を含む）
+#' @param newdata 予測用データ（NULL時はdataを使用）
+#' @return C-index値と信頼区間
+calculate_c_index <- function(model, data, newdata = NULL) {
+  
+  if (is.null(newdata)) {
+    newdata <- data
+  }
+  
+  # 予測値の取得
+  if (inherits(model, "coxph")) {
+    # Coxモデルの場合
+    pred <- predict(model, newdata = newdata, type = "risk")
+    
+    # concordance関数を使用
+    c_result <- survival::concordance(
+      data$surv_obj ~ pred,
+      reverse = TRUE
+    )
+    
+    c_index <- c_result$concordance
+    se <- sqrt(c_result$var)
+    
+  } else if (inherits(model, "lasso_cox")) {
+    # LASSOモデル
+    X_new <- model.matrix(~ . - 1, 
+                         data = newdata[, colnames(model$X), drop = FALSE])
+    pred <- predict(model$glmnet_model, newx = X_new, 
+                   s = model$lambda_min, type = "link")[, 1]
+    
+    c_result <- survival::concordance(
+      data$surv_obj ~ pred,
+      reverse = TRUE
+    )
+    
+    c_index <- c_result$concordance
+    se <- sqrt(c_result$var)
+    
+  } else {
+    # その他のモデル
+    pred <- get_predictions(model, newdata)
+    
+    if (all(is.na(pred))) {
+      return(list(c_index = NA, lower = NA, upper = NA, se = NA))
+    }
+    
+    c_result <- survival::concordance(
+      data$surv_obj ~ pred,
+      reverse = FALSE
+    )
+    
+    c_index <- c_result$concordance
+    se <- sqrt(c_result$var)
+  }
+  
+  # 95%信頼区間
+  lower <- c_index - 1.96 * se
+  upper <- c_index + 1.96 * se
+  
+  return(list(
+    c_index = c_index,
+    lower = max(0, lower),
+    upper = min(1, upper),
+    se = se
+  ))
+}
+
+# ========================================================================
+# 3. 時間依存AUC
+# ========================================================================
+
+#' 時間依存AUCを計算
+#' @param model モデルオブジェクト
+#' @param data 評価用データ
+#' @param times 評価時点のベクトル
+#' @return 時間依存AUC
+calculate_time_dependent_auc <- function(model, data, times = c(6, 12, 18, 24)) {
+  
+  if (!requireNamespace("timeROC", quietly = TRUE)) {
+    warning("timeROC package not available")
+    return(NULL)
+  }
+  
+  # 予測値の取得（リスクスコア）
+  if (inherits(model, "coxph")) {
+    marker <- predict(model, newdata = data, type = "lp")
+  } else if (inherits(model, "lasso_cox")) {
+    X_new <- model.matrix(~ . - 1, 
+                         data = data[, colnames(model$X), drop = FALSE])
+    marker <- predict(model$glmnet_model, newx = X_new, 
+                     s = model$lambda_min, type = "link")[, 1]
+  } else {
+    # 予測確率を使用
+    marker <- get_predictions(model, data, time_point = max(times))
+    if (all(is.na(marker))) {
+      return(NULL)
+    }
+  }
+  
+  # timeROCの実行
+  roc_result <- timeROC::timeROC(
+    T = data$time2y,
+    delta = as.numeric(data$recur_2y),
+    marker = marker,
+    cause = 1,
+    weighting = "marginal",
+    times = times,
+    iid = TRUE
+  )
+  
+  # 結果の整理
+  auc_df <- data.frame(
+    time = times,
+    AUC = roc_result$AUC,
+    AUC_lower = roc_result$AUC - 1.96 * roc_result$inference$vect_sd_1,
+    AUC_upper = roc_result$AUC + 1.96 * roc_result$inference$vect_sd_1
+  )
+  
+  auc_df$AUC_lower <- pmax(0, auc_df$AUC_lower)
+  auc_df$AUC_upper <- pmin(1, auc_df$AUC_upper)
+  
+  return(list(
+    auc_table = auc_df,
+    roc_object = roc_result
+  ))
+}
+
+# ========================================================================
+# 4. キャリブレーション評価
+# ========================================================================
+
+#' キャリブレーション評価
+#' @param model モデルオブジェクト
+#' @param data 評価用データ
+#' @param n_groups デシル分割数
+#' @param time_point 評価時点
+#' @return キャリブレーション統計量
+assess_calibration <- function(model, data, n_groups = 10, time_point = 24) {
+  
+  # 予測確率
+  pred_prob <- get_predictions(model, data, time_point)
+  
+  if (all(is.na(pred_prob))) {
+    return(list(
+      slope = NA,
+      intercept = NA,
+      groups = NULL
+    ))
+  }
+  
+  # ユニークな値が少ない場合の対処
+  n_unique <- length(unique(pred_prob[!is.na(pred_prob)]))
+  if (n_unique < n_groups) {
+    n_groups <- max(2, n_unique)
+  }
+  
+  # デシル分割
+  pred_groups <- tryCatch({
+    cut(pred_prob, 
+        breaks = quantile(pred_prob, probs = seq(0, 1, 1/n_groups), na.rm = TRUE),
+        include.lowest = TRUE,
+        labels = FALSE)
+  }, error = function(e) {
+    cut(pred_prob, breaks = n_groups, include.lowest = TRUE, labels = FALSE)
+  })
+  
+  # 各グループの観察・期待イベント率
+  calibration_data <- data.frame()
+  
+  for (g in 1:n_groups) {
+    idx <- which(pred_groups == g)
+    if (length(idx) > 0) {
+      # Kaplan-Meier推定
+      km_fit <- survival::survfit(
+        survival::Surv(time2y, recur_2y) ~ 1, 
+        data = data[idx, ]
+      )
+      
+      # 指定時点での観察イベント率
+      time_idx <- which.min(abs(km_fit$time - time_point))
+      if (length(time_idx) > 0) {
+        observed <- 1 - km_fit$surv[time_idx]
+      } else {
+        observed <- NA
+      }
+      
+      # 期待イベント率（予測値の平均）
+      expected <- mean(pred_prob[idx], na.rm = TRUE)
+      
+      # ===== 重要な修正：Inf/-Infを回避 =====
+      pred_min <- min(pred_prob[idx], na.rm = TRUE)
+      pred_max <- max(pred_prob[idx], na.rm = TRUE)
+      
+      # Inf/-Infをチェックしてから追加
+      if (is.finite(pred_min) && is.finite(pred_max)) {
+        calibration_data <- rbind(calibration_data, data.frame(
+          group = g,
+          n = length(idx),
+          expected = expected,
+          observed = observed,
+          pred_mean = expected,
+          pred_min = pred_min,
+          pred_max = pred_max
+        ))
+      } else {
+        # Inf/-Infの場合はNAを使用
+        calibration_data <- rbind(calibration_data, data.frame(
+          group = g,
+          n = length(idx),
+          expected = expected,
+          observed = observed,
+          pred_mean = expected,
+          pred_min = NA,
+          pred_max = NA
+        ))
+      }
+    }
+  }
+  
+  # Calibration slope & intercept
+  if (nrow(calibration_data) > 2 && !any(is.na(calibration_data$observed))) {
+    cal_model <- lm(observed ~ expected, data = calibration_data, weights = n)
+    slope <- coef(cal_model)["expected"]
+    intercept <- coef(cal_model)["(Intercept)"]
+  } else {
+    slope <- NA
+    intercept <- NA
+  }
+  
+  return(list(
+    slope = slope,
+    intercept = intercept,
+    groups = calibration_data
+  ))
+}
+# ========================================================================
+# 5. Decision Curve Analysis (DCA)
+# ========================================================================
+
+#' Decision Curve Analysis
+#' @param model モデルオブジェクト
+#' @param data 評価用データ
+#' @param thresholds 閾値の範囲
+#' @param time_point 評価時点
+#' @return DCA結果
+perform_dca <- function(model, data, 
+                       thresholds = seq(0.01, 0.50, by = 0.01),
+                       time_point = 24) {
+  
+  # 予測確率
+  pred_prob <- get_predictions(model, data, time_point)
+  
+  if (all(is.na(pred_prob))) {
+    return(NULL)
+  }
+  
+  # 実際のイベント（時間を考慮）
+  event_occurred <- (data$recur_2y == TRUE) & (data$time2y <= time_point)
+  
+  # DCA計算
+  dca_results <- data.frame(
+    threshold = thresholds,
+    net_benefit_model = numeric(length(thresholds)),
+    net_benefit_all = numeric(length(thresholds)),
+    net_benefit_none = 0
+  )
+  
+  n_total <- nrow(data)
+  
+  for (i in seq_along(thresholds)) {
+    thresh <- thresholds[i]
+    
+    # モデルによる介入
+    treat_model <- pred_prob >= thresh
+    tp_model <- sum(treat_model & event_occurred, na.rm = TRUE)
+    fp_model <- sum(treat_model & !event_occurred, na.rm = TRUE)
+    
+    # Net benefit計算
+    net_benefit_model <- (tp_model / n_total) - 
+                        (fp_model / n_total) * (thresh / (1 - thresh))
+    
+    # 全員治療
+    tp_all <- sum(event_occurred, na.rm = TRUE)
+    fp_all <- sum(!event_occurred, na.rm = TRUE)
+    net_benefit_all <- (tp_all / n_total) - 
+                      (fp_all / n_total) * (thresh / (1 - thresh))
+    
+    dca_results$net_benefit_model[i] <- net_benefit_model
+    dca_results$net_benefit_all[i] <- net_benefit_all
+  }
+  
+  return(dca_results)
+}
+
+# ========================================================================
+# 6. Brier Score
+# ========================================================================
+
+#' Brier Scoreを計算
+#' @param model モデルオブジェクト
+#' @param data 評価用データ
+#' @param time_point 評価時点
+#' @return Brier Score
+calculate_brier_score <- function(model, data, time_point = 24) {
+  
+  # 予測確率
+  pred_prob <- get_predictions(model, data, time_point)
+  
+  if (all(is.na(pred_prob))) {
+    return(list(brier_score = NA, scaled_brier = NA))
+  }
+  
+  # 実際のイベント（時間を考慮）
+  event_occurred <- (data$recur_2y == TRUE) & (data$time2y <= time_point)
+  
+  # Brier Score
+  brier_score <- mean((pred_prob - as.numeric(event_occurred))^2, na.rm = TRUE)
+  
+  # Scaled Brier Score（参照：イベント率）
+  event_rate <- mean(event_occurred, na.rm = TRUE)
+  max_brier <- event_rate * (1 - event_rate)
+  scaled_brier <- 1 - (brier_score / max_brier)
+  
+  return(list(
+    brier_score = brier_score,
+    scaled_brier = scaled_brier,
+    event_rate = event_rate
+  ))
+}
+
+# ========================================================================
+# 7. 統合評価関数
+# ========================================================================
+#' 単一モデルの評価（エラー処理強化版）
+#' @param model モデルオブジェクト
+#' @param train_data 訓練データ
+#' @param val_data 検証データ
+#' @param test_data テストデータ
+#' @param model_name モデル名
+#' @return 評価結果
+evaluate_single_model <- function(model, 
+                                 train_data, 
+                                 val_data = NULL, 
+                                 test_data = NULL,
+                                 model_name = "model") {
+  
+  message(sprintf("\n--- Model: %s ---", model_name))
+  
+  # ===== 重要な追加：必要なダミー変数を作成 =====
+  create_model_variables <- function(data, model) {
+    # モデルが必要とする変数を取得
+    if (inherits(model, "coxph")) {
+      needed_vars <- names(coef(model))
+    } else if (inherits(model, "list") && "model" %in% names(model)) {
+      if (!is.null(model$model)) {
+        needed_vars <- names(coef(model$model))
+      } else {
+        needed_vars <- character()
+      }
+    } else {
+      needed_vars <- character()
+    }
+    
+    # 必要なダミー変数を作成
+    for (var in needed_vars) {
+      if (!var %in% names(data)) {
+        # sm1, fc_inf1などの処理
+        if (grepl("1$", var)) {
+          base_var <- sub("1$", "", var)
+          if (base_var %in% names(data)) {
+            data[[var]] <- as.numeric(as.character(data[[base_var]]) == "1")
+          }
+        }
+        # macroVITRUE, microVITRUEの処理
+        else if (grepl("TRUE$", var)) {
+          base_var <- sub("TRUE$", "", var)
+          if (base_var %in% names(data)) {
+            data[[var]] <- as.numeric(data[[base_var]] == TRUE | 
+                                     data[[base_var]] == "TRUE")
+          }
+        }
+        # stage_diagBR1, stage_diagBR2の処理
+        else if (grepl("^stage_diagBR", var)) {
+          if ("stage_diag" %in% names(data)) {
+            level <- sub("^stage_diag", "", var)
+            data[[var]] <- as.numeric(data$stage_diag == level)
+          }
+        }
+        # liver_damageB, liver_damageCの処理
+        else if (grepl("^liver_damage[BC]$", var)) {
+          if ("liver_damage" %in% names(data)) {
+            level <- sub("^liver_damage", "", var)
+            data[[var]] <- as.numeric(data$liver_damage == level)
+          }
+        }
+        # child_pughB, child_pughCの処理
+        else if (grepl("^child_pugh[BC]$", var)) {
+          if ("child_pugh" %in% names(data)) {
+            level <- sub("^child_pugh", "", var)
+            data[[var]] <- as.numeric(data$child_pugh == level)
+          }
+        }
+      }
+    }
+    return(data)
+  }
+  
+  # 各データセットに変数作成を適用
+  if (!is.null(train_data)) {
+    train_data <- create_model_variables(train_data, model)
+  }
+  if (!is.null(val_data)) {
+    val_data <- create_model_variables(val_data, model)
+  }
+  if (!is.null(test_data)) {
+    test_data <- create_model_variables(test_data, model)
+  }
+  
+  # モデルタイプの判定と前処理
+  if (inherits(model, "list")) {
+    # リスト型モデル（LASSO, RFE, Univariate）
+    if ("glmnet_model" %in% names(model)) {
+      # LASSOモデル
+      model_type <- "lasso"
+    } else if ("model" %in% names(model) && !is.null(model$model)) {
+      # RFEやUnivariate（内部にcoxphモデル）
+      model <- model$model
+      model_type <- "cox"
+    } else {
+      message("  ⚠ Model structure not recognized, skipping")
+      return(NULL)
+    }
+  } else if (inherits(model, "coxph")) {
+    model_type <- "cox"
+  } else {
+    message("  ⚠ Unknown model type, skipping")
+    return(NULL)
+  }
+  
+  # データセットのリスト
+  datasets <- list(train = train_data, val = val_data, test = test_data)
+  results <- list()
+  
+  for (set_name in names(datasets)) {
+    if (!is.null(datasets[[set_name]])) {
+      message(sprintf("  Evaluating on %s set...", set_name))
+      
+      data <- datasets[[set_name]]
+      
+      # surv_objがない場合は作成
+      if (!"surv_obj" %in% names(data)) {
+        data$surv_obj <- survival::Surv(data$time2y, as.numeric(data$recur_2y))
+      }
+      
+      tryCatch({
+        if (model_type == "cox") {
+          # 必要な変数の確認と補完
+          model_vars <- all.vars(formula(model))
+          model_vars <- setdiff(model_vars, c("surv_obj", "Surv", "time2y", "recur_2y"))
+          
+          # TRUE/FALSE付き変数の処理
+          for (var in model_vars) {
+            # microVITRUE -> microVI
+            if (grepl("TRUE$", var)) {
+              base_var <- sub("TRUE$", "", var)
+              if (base_var %in% names(data) && !var %in% names(data)) {
+                data[[var]] <- data[[base_var]] == TRUE
+              }
+            }
+            # stage_diagBR1, stage_diagBR2の処理
+            if (grepl("^stage_diag", var) && !var %in% names(data)) {
+              if ("stage_diag" %in% names(data)) {
+                level <- sub("^stage_diag", "", var)
+                data[[var]] <- as.numeric(data$stage_diag == level)
+              }
+            }
+            # fc_inf1の処理
+            if (var == "fc_inf1" && !var %in% names(data) && "fc_inf" %in% names(data)) {
+              data[[var]] <- as.numeric(data$fc_inf == "1")
+            }
+          }
+          
+          # 予測
+          pred <- predict(model, newdata = data, type = "risk")
+          
+        } else if (model_type == "lasso") {
+          # LASSOの場合
+          lasso_model <- model$glmnet_model
+          X_cols <- colnames(model$X)
+          
+          # 必要な変数の作成
+          for (col in X_cols) {
+            if (!col %in% names(data)) {
+              # microVITRUE など
+              if (grepl("TRUE$", col)) {
+                base_var <- sub("TRUE$", "", col)
+                if (base_var %in% names(data)) {
+                  data[[col]] <- data[[base_var]] == TRUE
+                }
+              }
+              # stage_diagBR2 など
+              if (grepl("^stage_diag", col)) {
+                if ("stage_diag" %in% names(data)) {
+                  level <- sub("^stage_diag", "", col)
+                  data[[col]] <- as.numeric(data$stage_diag == level)
+                }
+              }
+            }
+          }
+          
+          # model.matrixの作成
+          formula_str <- paste("~ -1 +", paste(model$selected_vars, collapse = " + "))
+          X_new <- model.matrix(as.formula(formula_str), data = data)
+          
+          # 列を揃える
+          X_aligned <- matrix(0, nrow = nrow(X_new), ncol = ncol(model$X))
+          colnames(X_aligned) <- colnames(model$X)
+          common_cols <- intersect(colnames(model$X), colnames(X_new))
+          X_aligned[, common_cols] <- X_new[, common_cols]
+          
+          pred <- predict(lasso_model, newx = X_aligned, 
+                         s = model$lambda_min, type = "link")[, 1]
+        }
+        
+        # C-index計算
+        c_result <- survival::concordance(data$surv_obj ~ pred, reverse = TRUE)
+        c_index <- c_result$concordance
+        se <- sqrt(c_result$var)
+        
+        # 他の指標も計算
+        cal_result <- assess_calibration(model, data, time_point = 24)
+        brier_result <- calculate_brier_score(model, data, time_point = 24)
+        
+        results[[set_name]] <- list(
+          c_index = list(
+            c_index = c_index,
+            lower = max(0, c_index - 1.96 * se),
+            upper = min(1, c_index + 1.96 * se),
+            se = se
+          ),
+          calibration = cal_result,
+          brier = brier_result
+        )
+        
+        message(sprintf("    C-index: %.3f (95%% CI: %.3f-%.3f)", 
+                       c_index, 
+                       results[[set_name]]$c_index$lower,
+                       results[[set_name]]$c_index$upper))
+        
+        if (!is.na(cal_result$slope)) {
+          message(sprintf("    Calibration slope: %.3f, intercept: %.3f",
+                         cal_result$slope, cal_result$intercept))
+        }
+        
+        if (!is.na(brier_result$brier_score)) {
+          message(sprintf("    Brier score: %.3f (scaled: %.3f)",
+                         brier_result$brier_score, brier_result$scaled_brier))
+        }
+        
+      }, error = function(e) {
+        message(sprintf("  ❌ Error: %s", e$message))
+        results[[set_name]] <- NULL
+      })
+    }
+  }
+  
+  return(results)
+}
+
+#' モデルの包括的評価
+#' @param model モデルオブジェクト
+#' @param train_data 訓練データ
+#' @param val_data 検証データ
+#' @param test_data テストデータ
+#' @param config 設定リスト
+#' @return 評価結果のリスト
+evaluate_model_comprehensive <- function(model, 
+                                        train_data, 
+                                        val_data = NULL, 
+                                        test_data = NULL,
+                                        config = NULL) {
+  
+  # 評価時点の取得
+  if (!is.null(config) && !is.null(config$evaluation$time_points)) {
+    time_points <- config$evaluation$time_points
+  } else {
+    time_points <- c(6, 12, 18, 24)
+  }
+  
+  primary_time <- ifelse(!is.null(config$evaluation$primary_time_point),
+                        config$evaluation$primary_time_point, 24)
+  
+  # データ準備
+  datasets <- list(train = train_data)
+  if (!is.null(val_data)) datasets$val <- val_data
+  if (!is.null(test_data)) datasets$test <- test_data
+  
+  # 結果格納用
+  results <- list()
+  
+  for (set_name in names(datasets)) {
+    message(sprintf("\n  Evaluating on %s set...", set_name))
+    
+    data <- datasets[[set_name]]
+    
+    # surv_objがない場合は作成
+    if (!"surv_obj" %in% names(data)) {
+      data$surv_obj <- survival::Surv(
+        time = data$time2y,
+        event = as.numeric(data$recur_2y)
+      )
+    }
+    
+    # C-index
+    c_result <- calculate_c_index(model, data)
+    message(sprintf("    C-index: %.3f (95%% CI: %.3f-%.3f)", 
+                   c_result$c_index, c_result$lower, c_result$upper))
+    
+    # 時間依存AUC
+    auc_result <- calculate_time_dependent_auc(model, data, time_points)
+    if (!is.null(auc_result)) {
+      auc_primary <- auc_result$auc_table[auc_result$auc_table$time == primary_time, "AUC"]
+      message(sprintf("    AUC at %d months: %.3f", primary_time, auc_primary))
+    }
+    
+    # キャリブレーション
+    cal_result <- assess_calibration(model, data, time_point = primary_time)
+    if (!is.na(cal_result$slope)) {
+      message(sprintf("    Calibration slope: %.3f, intercept: %.3f", 
+                     cal_result$slope, cal_result$intercept))
+    }
+    
+    # Brier Score
+    brier_result <- calculate_brier_score(model, data, time_point = primary_time)
+    if (!is.na(brier_result$brier_score)) {
+      message(sprintf("    Brier score: %.3f (scaled: %.3f)", 
+                     brier_result$brier_score, brier_result$scaled_brier))
+    }
+    
+    # DCA（テストセットのみ）
+    if (set_name == "test") {
+      dca_result <- perform_dca(model, data, time_point = primary_time)
+    } else {
+      dca_result <- NULL
+    }
+    
+    # 結果を保存
+    results[[set_name]] <- list(
+      c_index = c_result,
+      time_auc = auc_result,
+      calibration = cal_result,
+      brier = brier_result,
+      dca = dca_result
+    )
+  }
+  
+  return(results)
+}
+
+# ========================================================================
+# 8. 全モデル評価
+# ========================================================================
+# 
+# #' 全モデルを評価
+# #' @param models モデルリスト
+# #' @param split_data 分割データ
+# #' @param config 設定リスト
+# #' @return 評価結果
+# evaluate_all_models <- function(models, split_data, config = NULL) {
+#   
+#   message("\n========================================")
+#   message("Evaluating All Models")
+#   message("========================================")
+#   # ===== 重要な修正：モデル構築時と同じ変数セットを使用 =====
+#   # モデルのtrain_data属性から変数を取得
+#   if (!is.null(attr(models, "train_data"))) {
+#     model_vars <- names(attr(models, "train_data"))
+#     # time2y, recur_2y, surv_obj以外の変数
+#     use_vars <- setdiff(model_vars, c("time2y", "recur_2y", "surv_obj"))
+#   } else {
+#     use_vars <- NULL
+#   }
+#   
+#   # データ準備（同じ変数セットを使用）
+#   train_data <- prepare_model_data(split_data$train, config = config, variables = use_vars)
+#   val_data <- prepare_model_data(split_data$val, config = config, variables = use_vars)
+#   test_data <- prepare_model_data(split_data$test, config = config, variables = use_vars)  
+#   # 結果格納
+#   all_results <- list()
+#   summary_table <- data.frame()
+#   
+#   for (model_name in names(models)) {
+#     
+#     model <- models[[model_name]]
+#     
+#     if (!is.null(model)) {
+#       # 新しいevaluate_single_model関数を使用
+#       eval_result <- evaluate_single_model(
+#         model,
+#         train_data,
+#         val_data,
+#         test_data,
+#         model_name
+#       )
+#       
+#       if (!is.null(eval_result)) {
+#         all_results[[model_name]] <- eval_result
+#         
+#         # サマリーテーブルに追加
+#         n_vars <- NA
+#         if (inherits(model, "coxph")) {
+#           n_vars <- length(coef(model))
+#         } else if (inherits(model, "list") && "selected_vars" %in% names(model)) {
+#           n_vars <- length(model$selected_vars)
+#         }
+#         
+#         summary_row <- data.frame(
+#           model = model_name,
+#           n_vars = n_vars,
+#           c_index_train = ifelse(!is.null(eval_result$train),
+#                                 eval_result$train$c_index$c_index, NA),
+#           c_index_val = ifelse(!is.null(eval_result$val),
+#                               eval_result$val$c_index$c_index, NA),
+#           c_index_test = ifelse(!is.null(eval_result$test),
+#                                eval_result$test$c_index$c_index, NA),
+#           brier_test = ifelse(!is.null(eval_result$test),
+#                              eval_result$test$brier$brier_score, NA)
+#         )
+#         
+#         summary_table <- rbind(summary_table, summary_row)
+#       }
+#     }
+#   }
+#   
+#   # サマリーテーブルをC-indexでソート
+#   if (nrow(summary_table) > 0) {
+#     summary_table <- summary_table[order(summary_table$c_index_test, decreasing = TRUE), ]
+#     rownames(summary_table) <- NULL
+#     
+#     message("\n📊 Model Performance Summary:")
+#     print(summary_table, digits = 3)
+#   }
+#   
+#   message("\n✅ Model evaluation completed!")
+#   message("========================================\n")
+#   
+#   # 結果を返す
+#   return(list(
+#     results = all_results,
+#     summary = summary_table,
+#     data = list(
+#       train = train_data,
+#       val = val_data,
+#       test = test_data
+#     )
+#   ))
+# }
+
+evaluate_all_models <- function(models, split_data, config = NULL) {
+  
+  message("\n========================================")
+  message("Evaluating All Models")
+  message("========================================")
+  
+  # ===== 重要な修正：prepare_model_dataを使わない =====
+  # split_dataはすでに準備済みなので、そのまま使用
+  train_data <- split_data$train
+  val_data <- split_data$val
+  test_data <- split_data$test
+  
+  # surv_objがない場合のみ作成（安全のため）
+  if (!"surv_obj" %in% names(train_data)) {
+    if (all(c("time2y", "recur_2y") %in% names(train_data))) {
+      train_data$surv_obj <- survival::Surv(
+        time = train_data$time2y,
+        event = as.numeric(train_data$recur_2y)
+      )
+    }
+  }
+  
+  if (!"surv_obj" %in% names(val_data)) {
+    if (all(c("time2y", "recur_2y") %in% names(val_data))) {
+      val_data$surv_obj <- survival::Surv(
+        time = val_data$time2y,
+        event = as.numeric(val_data$recur_2y)
+      )
+    }
+  }
+  
+  if (!"surv_obj" %in% names(test_data)) {
+    if (all(c("time2y", "recur_2y") %in% names(test_data))) {
+      test_data$surv_obj <- survival::Surv(
+        time = test_data$time2y,
+        event = as.numeric(test_data$recur_2y)
+      )
+    }
+  }
+  
+  # 結果格納
+  all_results <- list()
+  summary_table <- data.frame()
+  
+  for (model_name in names(models)) {
+    
+    model <- models[[model_name]]
+    
+    if (!is.null(model)) {
+      # evaluate_single_modelを使用
+      eval_result <- evaluate_single_model(
+        model,
+        train_data,
+        val_data,
+        test_data,
+        model_name
+      )
+      
+      if (!is.null(eval_result)) {
+        all_results[[model_name]] <- eval_result
+        
+        # サマリーテーブルに追加
+        n_vars <- NA
+        if (inherits(model, "coxph")) {
+          n_vars <- length(coef(model))
+        } else if (inherits(model, "list") && "selected_vars" %in% names(model)) {
+          n_vars <- length(model$selected_vars)
+        }
+        
+        summary_row <- data.frame(
+          model = model_name,
+          n_vars = n_vars,
+          c_index_train = ifelse(!is.null(eval_result$train),
+                                eval_result$train$c_index$c_index, NA),
+          c_index_val = ifelse(!is.null(eval_result$val),
+                              eval_result$val$c_index$c_index, NA),
+          c_index_test = ifelse(!is.null(eval_result$test),
+                               eval_result$test$c_index$c_index, NA),
+          brier_test = ifelse(!is.null(eval_result$test),
+                             eval_result$test$brier$brier_score, NA)
+        )
+        
+        summary_table <- rbind(summary_table, summary_row)
+      }
+    }
+  }
+  
+  # サマリーテーブルをC-indexでソート
+  if (nrow(summary_table) > 0) {
+    summary_table <- summary_table[order(summary_table$c_index_test, decreasing = TRUE, na.last = TRUE), ]
+    rownames(summary_table) <- NULL
+    
+    message("\n📊 Model Performance Summary:")
+    print(summary_table, digits = 3)
+  }
+  
+  message("\n✅ Model evaluation completed!")
+  message("========================================\n")
+  
+  # 結果を返す（dataは含めない - 二重になるため）
+  return(list(
+    results = all_results,
+    summary = summary_table
+  ))
+}
+
+# ========================================================================
+# 9. 評価結果の保存
+# ========================================================================
+
+#' 評価結果を保存
+#' @param evaluation_results 評価結果
+#' @param file_path 保存先パス
+#' @param format 保存形式（"rds", "csv"）
+save_evaluation_results <- function(evaluation_results, 
+                                   file_path, 
+                                   format = "rds") {
+  
+  # ディレクトリ作成
+  dir_path <- dirname(file_path)
+  if (!dir.exists(dir_path)) {
+    dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
+  }
+  
+  if (format == "rds") {
+    saveRDS(evaluation_results, file = file_path)
+    message(sprintf("  ✓ Results saved to: %s", file_path))
+    
+  } else if (format == "csv") {
+    # サマリーテーブルのみCSV保存
+    write.csv(evaluation_results$summary, 
+             file = file_path, 
+             row.names = FALSE)
+    message(sprintf("  ✓ Summary saved to: %s", file_path))
+  }
+}
+
+# ========================================================================
+# 10. モデル比較
+# ========================================================================
+
+#' モデルの統計的比較
+#' @param results 評価結果
+#' @param metric 比較指標（"c_index", "auc", "brier"）
+#' @param dataset データセット名（"test", "val"）
+#' @return 比較結果
+compare_models_statistically <- function(results, 
+                                        metric = "c_index",
+                                        dataset = "test") {
+  
+  message("\n📊 Statistical Model Comparison")
+  message(sprintf("  Metric: %s, Dataset: %s", metric, dataset))
+  
+  # 比較用のデータ抽出
+  comparison_data <- data.frame()
+  
+  for (model_name in names(results$results)) {
+    model_result <- results$results[[model_name]]
+    
+    if (!is.null(model_result) && !is.null(model_result[[dataset]])) {
+      
+      if (metric == "c_index") {
+        value <- model_result[[dataset]]$c_index$c_index
+        se <- model_result[[dataset]]$c_index$se
+        
+      } else if (metric == "brier") {
+        value <- model_result[[dataset]]$brier$brier_score
+        se <- NA  # Brier scoreの標準誤差は通常計算しない
+        
+      } else {
+        value <- NA
+        se <- NA
+      }
+      
+      comparison_data <- rbind(comparison_data, data.frame(
+        model = model_name,
+        value = value,
+        se = se
+      ))
+    }
+  }
+  
+  # ランキング
+  comparison_data <- comparison_data[order(comparison_data$value, 
+                                         decreasing = (metric == "c_index")), ]
+  comparison_data$rank <- 1:nrow(comparison_data)
+  
+  # 最良モデル
+  best_model <- comparison_data$model[1]
+  best_value <- comparison_data$value[1]
+  
+  message(sprintf("\n  Best model: %s (%s = %.3f)", 
+                 best_model, metric, best_value))
+  
+  # 上位5モデル
+  message("\n  Top 5 models:")
+  for (i in 1:min(5, nrow(comparison_data))) {
+    message(sprintf("    %d. %s: %.3f", 
+                   i, 
+                   comparison_data$model[i],
+                   comparison_data$value[i]))
+  }
+  
+  return(comparison_data)
+}
+```
+

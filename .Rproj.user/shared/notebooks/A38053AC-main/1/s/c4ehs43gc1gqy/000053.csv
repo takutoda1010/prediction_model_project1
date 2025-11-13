@@ -1,0 +1,95 @@
+"0","# 下記を一度だけ実行"
+"0","#.Rmdから.Rファイルを生成（一度だけ実行）"
+"0","library(knitr)"
+"0",""
+"0","script_dir <- file.path(PROJECT_DIR, ""04_Script"", ""R"")"
+"0",""
+"0","# .Rmdファイルのリスト"
+"0","rmd_files <- list.files(script_dir, pattern = ""\\.Rmd$"", full.names = TRUE)"
+"0",""
+"0","for (rmd_file in rmd_files) {"
+"0","  # 出力ファイル名（.Rmd → .R）"
+"0","  r_file <- sub(""\\.Rmd$"", "".R"", rmd_file)"
+"0",""
+"0","  # Rコードを抽出して保存"
+"0","  knitr::purl(rmd_file, output = r_file, quiet = TRUE, documentation = 0)"
+"0",""
+"0","  message(sprintf(""Created: %s"", basename(r_file)))"
+"0","}"
+"2","Created: 00_setup.R
+"
+"2","Created: 01_data_loader.R
+"
+"2","Created: 02_data_cleaner.R
+"
+"2","Created: 03_feature_engineer.R
+"
+"2","Created: 04_data_splitter.R
+"
+"2","Created: 05_model_builder.R
+"
+"2","Created: 06_model_evaluator.R
+"
+"2","Created: 07_visualizer.R
+"
+"0","# ========================================================================"
+"0","# 1. ソースファイルの読み込み"
+"0","# ========================================================================"
+"0",""
+"0","message(""\n📚 Loading source files..."")"
+"2","
+📚 Loading source files...
+"
+"0","message(""----------------------------------------"")"
+"2","----------------------------------------
+"
+"0","# スクリプトディレクトリ"
+"0","script_dir <- file.path(PROJECT_DIR, ""04_Script"", ""R"")"
+"0",""
+"0","# .Rファイルを読み込み（.Rmdではなく）"
+"0","source_files <- c("
+"0","  ""00_setup.R"",      # .R に変更"
+"0","  ""01_data_loader.R"","
+"0","  ""02_data_cleaner.R"","
+"0","  ""03_feature_engineer.R"","
+"0","  ""04_data_splitter.R"","
+"0","  ""05_model_builder.R"","
+"0","  ""06_model_evaluator.R"","
+"0","  ""07_visualizer.R"""
+"0",")"
+"0",""
+"0","for (file in source_files) {"
+"0","  file_path <- file.path(script_dir, file)"
+"0","  if (file.exists(file_path)) {"
+"0","    source(file_path)"
+"0","    message(sprintf(""  ✓ Loaded: %s"", file))"
+"0","  } else {"
+"0","    warning(sprintf(""  ✗ File not found: %s"", file))"
+"0","  }"
+"0","}"
+"2","
+=== Loading Core Packages ===
+"
+"2","
+=== Loading Optional Packages ===
+"
+"2","Optional package 'VIM' not available. Skipping.
+"
+"2","Optional package 'mice' not available. Skipping.
+"
+"2","  ✓ Loaded: 00_setup.R
+"
+"2","  ✓ Loaded: 01_data_loader.R
+"
+"2","  ✓ Loaded: 02_data_cleaner.R
+"
+"2","  ✓ Loaded: 03_feature_engineer.R
+"
+"2","  ✓ Loaded: 04_data_splitter.R
+"
+"2","  ✓ Loaded: 05_model_builder.R
+"
+"2","  ✓ Loaded: 06_model_evaluator.R
+"
+"2","  ✓ Loaded: 07_visualizer.R
+"

@@ -1,0 +1,7 @@
+"0","# LOESSの平滑線（参考）"
+"0","lo <- try(loess(obs ~ pred, data = aj_dec, span = 0.8), silent = TRUE)"
+"0","if (!inherits(lo, ""try-error"")) {"
+"0","  xs <- seq(min(aj_dec$pred), max(aj_dec$pred), length.out = 300)"
+"0","  ys <- pmin(pmax(predict(lo, newdata = data.frame(pred = xs)), 0), 1)"
+"0","  lines(xs, ys, lwd = 2)"
+"0","}"
