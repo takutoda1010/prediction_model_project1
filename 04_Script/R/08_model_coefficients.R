@@ -210,10 +210,10 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
   }
 
   coef_mat <- tryCatch({
-    as.matrix(glmnet::coef(model, s = lambda_used))
+    as.matrix(stats::coef(model, s = lambda_used))
   }, error = function(e) {
     if (inherits(model, "glmnet")) {
-      as.matrix(glmnet::coef(model))
+      as.matrix(stats::coef(model))
     } else {
       stop(e)
     }
