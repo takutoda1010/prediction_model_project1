@@ -1,7 +1,0 @@
-"0","ds04 <- ds04 |>"
-"0","  dplyr::mutate("
-"0","    .time_base = dplyr::coalesce(rfs_months, os_months),"
-"0","    time2y = dplyr::if_else(!is.na(.time_base), pmin(.time_base, 24), NA_real_)"
-"0","  ) |>"
-"0","  dplyr::select(-.time_base)"
-"0",""

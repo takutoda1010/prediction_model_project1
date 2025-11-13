@@ -1,9 +1,0 @@
-"0",""
-"0","na_rate <- function(x) mean(is.na(x))"
-"0","core_na_trva <- sapply(core_vars, function(v) if(v %in% names(ds07_trva)) na_rate(ds07_trva[[v]]) else NA)"
-"0","core_na_te   <- sapply(core_vars, function(v) if(v %in% names(ds06_test))   na_rate(ds06_test[[v]]) else NA)"
-"0","cat(""\nNA rate (raw features)\n"")"
-"1","
-NA rate (raw features)
-"
-"0","print(data.frame(var=core_vars, train_val=core_na_trva, test=core_na_te, row.names=NULL))"

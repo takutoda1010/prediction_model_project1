@@ -1,2 +1,0 @@
-"0","ds01_model %>% summarise(op_date_min = min(op_date, na.rm=TRUE),"
-"0","                         op_date_max = max(op_date, na.rm=TRUE))"

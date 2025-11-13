@@ -1,7 +1,0 @@
-"0","# 参考: LOESS（全点、重みなしの簡易版）"
-"0","lo <- try(loess(obs ~ pred, data = agg, span = 0.8), silent = TRUE)"
-"0","if (!inherits(lo, ""try-error"")) {"
-"0","  xs <- seq(min(agg$pred), max(agg$pred), length.out = 200)"
-"0","  ys <- predict(lo, newdata = data.frame(pred = xs))"
-"0","  lines(xs, pmin(pmax(ys, 0), 1), lwd = 2)"
-"0","}"

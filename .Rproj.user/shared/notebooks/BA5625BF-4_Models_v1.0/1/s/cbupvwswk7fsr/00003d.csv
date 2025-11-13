@@ -1,8 +1,0 @@
-"0","## ==== CHUNK M7-fig-simple (fixed): x = log(lambda), y = coefficients ========="
-"0","stopifnot(exists(""fit_glmnet""))"
-"0",""
-"0","op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)"
-"0","par(mar = c(4,4,2,1))"
-"0",""
-"0","# glmnet標準: x軸は log(lambda)（負の値が右へ行くほど大きくなる）"
-"0","plot(fit_glmnet, xvar = ""lambda"", label = FALSE, sign.lambda = 1)"

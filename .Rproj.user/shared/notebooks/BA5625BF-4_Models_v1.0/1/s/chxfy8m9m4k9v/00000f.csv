@@ -1,8 +1,0 @@
-"0","## ==== CHUNK M7-0: add package (glmnet) & light checks ======================="
-"0","suppressPackageStartupMessages({ library(glmnet) })"
-"0","stopifnot(exists(""ds09_train""), exists(""ds09_val""), exists(""ds09_test""),"
-"0","          exists(""preds""), exists(""prep_surv""), exists(""eval_model""))"
-"0",""
-"0","# 個別に Train/Val を用意（既存の関数を再利用）"
-"0","trn <- prep_surv(ds09_train)"
-"0","val <- prep_surv(ds09_val)"

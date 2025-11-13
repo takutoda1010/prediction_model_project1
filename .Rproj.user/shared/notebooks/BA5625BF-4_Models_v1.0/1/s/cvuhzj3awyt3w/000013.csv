@@ -1,6 +1,0 @@
-"0","if (!exists(""model_results"")) model_results <- list()"
-"0","model_results[[model_name_m7]] <- c(res_m7,"
-"0","                                    list(lambda_star = lambda_star,"
-"0","                                         val_cindex  = cval_star,"
-"0","                                         selected_vars = sel_vars))"
-"0",""

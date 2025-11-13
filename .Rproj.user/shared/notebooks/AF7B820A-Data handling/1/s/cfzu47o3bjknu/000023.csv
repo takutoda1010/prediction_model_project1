@@ -1,5 +1,0 @@
-"0","# ds01 側の group を作り直すなら（基準は ""others""）"
-"0","ds01 <- ds01 |>"
-"0","  mutate(group = forcats::fct_relevel(factor(Group), ""others""))"
-"2","mutate: changed 990 values (100%) of 'group' (990 fewer NAs)"
-"0","dplyr::count(ds01, group)"

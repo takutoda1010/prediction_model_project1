@@ -1,5 +1,0 @@
-"0",""
-"0","message(""■ カテゴリ頻度・割合（NA含む）"")"
-"2","■ カテゴリ頻度・割合（NA含む）
-"
-"0","print(cat_summary, row.names = FALSE)"

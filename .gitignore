@@ -1,0 +1,13 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+.Renviron
+.env
+*_cache/
+*_files/
+data_raw/
+outputs/
+models/
+figs/

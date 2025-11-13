@@ -1,2 +1,0 @@
-"0","# デシルごとのサンプルサイズをラベル表示（任意）"
-"0","text(aj_dec$pred, aj_dec$obs, labels = aj_dec$n, pos = 3, cex = 0.8)"

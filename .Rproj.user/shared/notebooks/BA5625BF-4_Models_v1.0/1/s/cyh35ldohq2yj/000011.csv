@@ -1,5 +1,0 @@
-"0","## ==== CHUNK4e_fix: Model 5 — evaluation on Test ============================="
-"0","res_m5 <- eval_model(fit_m5r, tst, model_name_m5)"
-"1","
-[M5_Uni0.1_then_Step_p0.05_robust] Harrell's C = 0.716 (SE=0.035) 95%CI [0.647, 0.784]
-"

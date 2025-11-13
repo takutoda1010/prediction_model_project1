@@ -1,3 +1,0 @@
-"0","cat(sprintf(""Kmax=%d  -> initial var_superset len=%d\n"", Kmax, length(var_superset)))"
-"1","Kmax=10  -> initial var_superset len=0
-"

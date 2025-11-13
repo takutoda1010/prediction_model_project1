@@ -1,6 +1,0 @@
-"0",""
-"0","# 参考: 選択λ*の位置"
-"0","if (exists(""lambda_star"")) {"
-"0","  abline(v = log(lambda_star), lty = 2, lwd = 2)"
-"0","}"
-"0",""

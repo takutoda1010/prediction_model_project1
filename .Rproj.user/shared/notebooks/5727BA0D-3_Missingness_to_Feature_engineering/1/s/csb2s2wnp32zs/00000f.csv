@@ -1,7 +1,0 @@
-"0","ds04 <- ds04 |>"
-"0","  dplyr::mutate("
-"0","    BMI = dplyr::case_when("
-"0","      !is.na(weight_kg) & !is.na(height_cm) & height_cm > 0 ~ weight_kg / ( (height_cm/100)^2 ),"
-"0","      TRUE ~ NA_real_"
-"0","    )"
-"0","  )"

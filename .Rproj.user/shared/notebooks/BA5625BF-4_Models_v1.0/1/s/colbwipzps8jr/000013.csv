@@ -1,5 +1,0 @@
-"0","## ==== CHUNK4d: Model 4 — evaluation on Test (C-index & TD-AUC) ============="
-"0","res_m4 <- eval_model(fit_m4, tst, model_name_m4)"
-"1","
-[M4_StepBIC_backward] Harrell's C = 0.714 (SE=0.034) 95%CI [0.647, 0.781]
-"

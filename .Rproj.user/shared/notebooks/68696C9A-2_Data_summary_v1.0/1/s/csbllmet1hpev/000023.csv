@@ -1,9 +1,0 @@
-"0",""
-"0","# 右/左 skew のみ抽出（参考）"
-"0","right_skew <- skew_tbl %>% dplyr::filter(!is.na(skewness) & skewness > 0)"
-"0","left_skew  <- skew_tbl %>% dplyr::filter(!is.na(skewness) & skewness < 0)"
-"0",""
-"0","cat(""\n候補（右裾重 top 10）:\n""); print(head(right_skew, 10), row.names = FALSE)"
-"1","
-候補（右裾重 top 10）:
-"

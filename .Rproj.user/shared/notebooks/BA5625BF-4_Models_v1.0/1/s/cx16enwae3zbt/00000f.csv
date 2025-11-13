@@ -1,2 +1,0 @@
-"0","ds09 <- ds08 %>% dplyr::filter(!is.na(recur_2y))"
-"0","# ← この ds08_model を時間的に 60/20/20 に split して学習・検証・外部（時間）検証へ"

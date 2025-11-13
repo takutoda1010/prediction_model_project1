@@ -1,2 +1,0 @@
-"0","if (!exists(""model_results"")) model_results <- list()"
-"0","model_results[[model_name_m5]] <- res_m5"

@@ -1,4 +1,0 @@
-"0",""
-"0","# 主領域 5–30% をシェーディング"
-"0","usr <- par(""usr"")"
-"0","rect(0.05, usr[3], 0.30, usr[4], col = adjustcolor(""grey80"", alpha.f = 0.4), border = NA)"

@@ -1,5 +1,0 @@
-"0",""
-"0","mtext(sprintf(""Mean(pred)=%.3f, AJ(24)=%.3f, CITL≈%.3f"","
-"0","              mean(df_plot$pred), obs_all_24, citl),"
-"0","      side = 3, adj = 1, cex = 0.9)"
-"0",""

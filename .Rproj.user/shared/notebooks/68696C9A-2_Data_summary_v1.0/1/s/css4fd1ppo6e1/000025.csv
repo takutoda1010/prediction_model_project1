@@ -1,5 +1,0 @@
-"0",""
-"0","message(""■ 欠損サマリ（対象変数）"")"
-"2","■ 欠損サマリ（対象変数）
-"
-"0","print(missingness, row.names = FALSE)"

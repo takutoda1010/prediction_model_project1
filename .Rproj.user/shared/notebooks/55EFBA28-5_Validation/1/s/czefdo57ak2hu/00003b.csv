@@ -1,4 +1,0 @@
-"0","legend(""topleft"", bty = ""n"","
-"0","       legend = c(""KM by decile"", ""LOESS (observed)"", ""Cox recalibrated""),"
-"0","       pch = c(19, NA, NA), lty = c(NA, 1, 1), lwd = c(NA, 2, 2),"
-"0","       col = c(""black"", ""black"", ""purple3""))"
