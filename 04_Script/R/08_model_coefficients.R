@@ -25,6 +25,56 @@ suppressPackageStartupMessages({
   library(glmnet)
 })
 
+format_num <- function(x, digits = 3) {
+  ifelse(
+    is.na(x),
+    "",
+    formatC(x, format = "f", digits = digits, big.mark = ",")
+  )
+}
+
+format_p <- function(p) {
+  ifelse(
+    is.na(p),
+    "",
+    ifelse(p < 0.001, "<0.001", formatC(p, format = "f", digits = 3))
+  )
+}
+
+format_ci <- function(low, high, digits = 3) {
+  ifelse(
+    is.na(low) | is.na(high),
+    "",
+    paste0(format_num(low, digits), " to ", format_num(high, digits))
+  )
+}
+
+empty_coef_tibble <- function() {
+  tibble(
+    model = character(),
+    model_type = character(),
+    term = character(),
+    estimate = double(),
+    exp_estimate = double(),
+    std_error = double(),
+    statistic = double(),
+    p_value = double(),
+    conf_low = double(),
+    conf_high = double(),
+    exp_conf_low = double(),
+    exp_conf_high = double(),
+    lambda = double()
+  )
+}
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || (length(x) == 1 && is.na(x))) {
+    y
+  } else {
+    x
+  }
+}
+
 # ========================================================================
 # 1. ヘルパー関数: coxph
 # ========================================================================
@@ -36,36 +86,14 @@ suppressPackageStartupMessages({
 extract_coefs_coxph <- function(model, model_name) {
 
   if (is.null(model)) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   summary_obj <- summary(model)
   coef_mat <- summary_obj$coefficients
 
   if (is.null(coef_mat) || nrow(coef_mat) == 0) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   conf_mat <- tryCatch({
@@ -84,6 +112,7 @@ extract_coefs_coxph <- function(model, model_name) {
 
   tibble(
     model = model_name,
+    model_type = "coxph",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, "coef"]),
     exp_estimate = as.numeric(coef_mat[, "exp(coef)"]),
@@ -92,6 +121,8 @@ extract_coefs_coxph <- function(model, model_name) {
     p_value = as.numeric(coef_mat[, "Pr(>|z|)"]),
     conf_low = conf_low,
     conf_high = conf_high,
+    exp_conf_low = exp(conf_low),
+    exp_conf_high = exp(conf_high),
     lambda = NA_real_
   )
 }
@@ -107,36 +138,14 @@ extract_coefs_coxph <- function(model, model_name) {
 extract_coefs_glm <- function(model, model_name) {
 
   if (is.null(model)) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   summary_obj <- summary(model)
   coef_mat <- summary_obj$coefficients
 
   if (is.null(coef_mat) || nrow(coef_mat) == 0) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   conf_mat <- tryCatch({
@@ -155,6 +164,7 @@ extract_coefs_glm <- function(model, model_name) {
 
   tibble(
     model = model_name,
+    model_type = "glm",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, "Estimate"]),
     exp_estimate = exp(as.numeric(coef_mat[, "Estimate"])),
@@ -163,6 +173,8 @@ extract_coefs_glm <- function(model, model_name) {
     p_value = as.numeric(coef_mat[, 4]),
     conf_low = conf_low,
     conf_high = conf_high,
+    exp_conf_low = exp(conf_low),
+    exp_conf_high = exp(conf_high),
     lambda = NA_real_
   )
 }
@@ -179,18 +191,7 @@ extract_coefs_glm <- function(model, model_name) {
 extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
 
   if (is.null(model)) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   lambda_used <- lambda_value
@@ -210,32 +211,22 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
   }
 
   coef_mat <- tryCatch({
-    as.matrix(glmnet::coef(model, s = lambda_used))
+    as.matrix(stats::coef(model, s = lambda_used))
   }, error = function(e) {
     if (inherits(model, "glmnet")) {
-      as.matrix(glmnet::coef(model))
+      as.matrix(stats::coef(model))
     } else {
       stop(e)
     }
   })
 
   if (nrow(coef_mat) == 0) {
-    return(tibble(
-      model = character(),
-      term = character(),
-      estimate = double(),
-      exp_estimate = double(),
-      std_error = double(),
-      statistic = double(),
-      p_value = double(),
-      conf_low = double(),
-      conf_high = double(),
-      lambda = double()
-    ))
+    return(empty_coef_tibble())
   }
 
   tibble(
     model = model_name,
+    model_type = "cv.glmnet",
     term = rownames(coef_mat),
     estimate = as.numeric(coef_mat[, 1]),
     exp_estimate = exp(as.numeric(coef_mat[, 1])),
@@ -244,9 +235,86 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
     p_value = NA_real_,
     conf_low = NA_real_,
     conf_high = NA_real_,
+    exp_conf_low = NA_real_,
+    exp_conf_high = NA_real_,
     lambda = lambda_used
   ) %>%
     filter(term != "(Intercept)")
+}
+
+# ========================================================================
+# 3-b. ヘルパー関数: lasso_cox
+# ========================================================================
+
+#' lasso_cox モデルから係数を抽出
+#' @param model lasso_cox オブジェクト
+#' @param model_name モデル名
+#' @return tibble
+extract_coefs_lasso_cox <- function(model, model_name) {
+
+  if (is.null(model)) {
+    return(empty_coef_tibble())
+  }
+
+  lambda_used <- model$lambda_min %||% model$lambda %||%
+    if (!is.null(model$cv_fit) && !is.null(model$cv_fit$lambda.min)) {
+      model$cv_fit$lambda.min
+    } else if (!is.null(model$glmnet_model) && !is.null(model$glmnet_model$lambda)) {
+      tail(model$glmnet_model$lambda, 1)
+    } else {
+      NA_real_
+    }
+
+  if (!is.null(model$fit) && inherits(model$fit, "coxph")) {
+    return(
+      extract_coefs_coxph(model$fit, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$model) && inherits(model$model, "coxph")) {
+    return(
+      extract_coefs_coxph(model$model, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$glmnet_model)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$glmnet_model,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$cv_fit)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$cv_fit,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  warning(sprintf("LASSO model '%s' does not contain recognizable coefficient data", model_name))
+  empty_coef_tibble()
 }
 
 # ========================================================================
@@ -271,12 +339,8 @@ extract_coefs <- function(model, model_name) {
     return(extract_coefs_cv_glmnet(model, model_name))
   }
 
-  if (inherits(model, "lasso_cox") && !is.null(model$glmnet_model)) {
-    return(extract_coefs_cv_glmnet(model$glmnet_model, model_name, lambda_value = model$lambda_min))
-  }
-
-  if (inherits(model, "lasso_cox") && !is.null(model$cv_fit)) {
-    return(extract_coefs_cv_glmnet(model$cv_fit, model_name, lambda_value = model$lambda_min))
+  if (inherits(model, "lasso_cox")) {
+    return(extract_coefs_lasso_cox(model, model_name))
   }
 
   if (inherits(model, "univariate_cox") && !is.null(model$model)) {
@@ -289,18 +353,7 @@ extract_coefs <- function(model, model_name) {
 
   warning(sprintf("Unsupported model class for '%s': %s", model_name, paste(class(model), collapse = ", ")))
 
-  tibble(
-    model = character(),
-    term = character(),
-    estimate = double(),
-    exp_estimate = double(),
-    std_error = double(),
-    statistic = double(),
-    p_value = double(),
-    conf_low = double(),
-    conf_high = double(),
-    lambda = double()
-  )
+  empty_coef_tibble()
 }
 
 # ========================================================================
@@ -327,6 +380,7 @@ coef_table <- purrr::imap_dfr(models, extract_coefs)
 coef_table <- coef_table %>%
   mutate(
     model = as.character(model),
+    model_type = as.character(model_type),
     term = as.character(term),
     estimate = as.numeric(estimate),
     exp_estimate = as.numeric(exp_estimate),
@@ -335,15 +389,42 @@ coef_table <- coef_table %>%
     p_value = as.numeric(p_value),
     conf_low = as.numeric(conf_low),
     conf_high = as.numeric(conf_high),
+    exp_conf_low = as.numeric(exp_conf_low),
+    exp_conf_high = as.numeric(exp_conf_high),
     lambda = as.numeric(lambda)
   ) %>%
-  select(model, term, estimate, exp_estimate, std_error, statistic, p_value, conf_low, conf_high, lambda)
+  select(model, model_type, term, estimate, exp_estimate, std_error, statistic, p_value, conf_low, conf_high, exp_conf_low, exp_conf_high, lambda)
+
+pretty_table <- coef_table %>%
+  mutate(
+    Beta = format_num(estimate),
+    SE = format_num(std_error),
+    Statistic = format_num(statistic),
+    `P-value` = format_p(p_value),
+    `95% CI (Beta)` = format_ci(conf_low, conf_high),
+    `Exp(Beta)` = format_num(exp_estimate),
+    `95% CI (Exp(Beta))` = format_ci(exp_conf_low, exp_conf_high),
+    Lambda = format_num(lambda, digits = 5)
+  ) %>%
+  select(
+    Model = model,
+    `Model Type` = model_type,
+    Term = term,
+    Beta,
+    SE,
+    Statistic,
+    `P-value`,
+    `95% CI (Beta)`,
+    `Exp(Beta)`,
+    `95% CI (Exp(Beta))`,
+    Lambda
+  )
 
 # 出力ディレクトリの作成
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 }
 
-readr::write_csv(coef_table, output_path)
+readr::write_csv(pretty_table, output_path)
 
 message(sprintf("Saved model coefficients to: %s", output_path))
