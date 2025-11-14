@@ -423,6 +423,81 @@ extract_coefs_lasso_cox <- function(model, model_name) {
 }
 
 # ========================================================================
+# 3-b. ヘルパー関数: lasso_cox
+# ========================================================================
+
+#' lasso_cox モデルから係数を抽出
+#' @param model lasso_cox オブジェクト
+#' @param model_name モデル名
+#' @return tibble
+extract_coefs_lasso_cox <- function(model, model_name) {
+
+  if (is.null(model)) {
+    return(empty_coef_tibble())
+  }
+
+  lambda_used <- model$lambda_min %||% model$lambda %||%
+    if (!is.null(model$cv_fit) && !is.null(model$cv_fit$lambda.min)) {
+      model$cv_fit$lambda.min
+    } else if (!is.null(model$glmnet_model) && !is.null(model$glmnet_model$lambda)) {
+      tail(model$glmnet_model$lambda, 1)
+    } else {
+      NA_real_
+    }
+
+  if (!is.null(model$fit) && inherits(model$fit, "coxph")) {
+    return(
+      extract_coefs_coxph(model$fit, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$model) && inherits(model$model, "coxph")) {
+    return(
+      extract_coefs_coxph(model$model, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$glmnet_model)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$glmnet_model,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$cv_fit)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$cv_fit,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  warning(sprintf("LASSO model '%s' does not contain recognizable coefficient data", model_name))
+  empty_coef_tibble()
+}
+
+# ========================================================================
 # 4. ディスパッチ関数
 # ========================================================================
 
