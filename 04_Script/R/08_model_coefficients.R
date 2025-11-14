@@ -75,6 +75,32 @@ empty_coef_tibble <- function() {
   }
 }
 
+quote_terms <- function(terms) {
+  if (length(terms) == 0) {
+    character()
+  } else {
+    paste0("`", gsub("`", "\\`", terms, fixed = TRUE), "`")
+  }
+}
+
+build_surv_object <- function(y) {
+  if (inherits(y, "Surv")) {
+    return(y)
+  }
+
+  y_df <- as.data.frame(y)
+
+  if (ncol(y_df) < 2) {
+    return(NULL)
+  }
+
+  if (ncol(y_df) == 2) {
+    return(survival::Surv(y_df[[1]], y_df[[2]]))
+  }
+
+  survival::Surv(y_df[[1]], y_df[[2]], y_df[[3]])
+}
+
 # ========================================================================
 # 1. ヘルパー関数: coxph
 # ========================================================================
@@ -239,7 +265,8 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
     exp_conf_high = NA_real_,
     lambda = lambda_used
   ) %>%
-    filter(term != "(Intercept)")
+    filter(term != "(Intercept)") %>%
+    filter(!is.na(estimate) & !near(estimate, 0))
 }
 
 # ========================================================================
@@ -265,55 +292,51 @@ fit_lasso_post_coxph <- function(model) {
   }
 
   design_matrix <- model$X[, available_vars, drop = FALSE]
-  surv_df <- as.data.frame(model$y)
+  surv_obj <- build_surv_object(model$y)
 
-  if (ncol(surv_df) < 2) {
+  if (is.null(surv_obj)) {
     return(NULL)
   }
 
-  if (ncol(surv_df) == 2) {
-    data <- cbind(
-      as.data.frame(design_matrix),
-      time = surv_df[[1]],
-      status = surv_df[[2]]
-    )
+  design_df <- as.data.frame(design_matrix)
+  rhs_terms <- quote_terms(colnames(design_df))
 
-    formula <- as.formula(
-      paste("Surv(time, status) ~", paste(available_vars, collapse = " + "))
-    )
-
-    return(
-      tryCatch(
-        survival::coxph(formula, data = data),
-        error = function(e) NULL
-      )
-    )
+  if (length(rhs_terms) == 0) {
+    return(NULL)
   }
 
-  if (ncol(surv_df) >= 3) {
-    data <- cbind(
-      as.data.frame(design_matrix),
+  if (attr(surv_obj, "type") %in% c("right", "counting")) {
+    surv_df <- as.data.frame(surv_obj)
+  } else {
+    surv_df <- as.data.frame(model$y)
+  }
+
+  if (ncol(surv_df) == 2) {
+    fitting_df <- cbind(design_df, time = surv_df[[1]], status = surv_df[[2]])
+    formula <- as.formula(
+      paste0("survival::Surv(time, status) ~ ", paste(rhs_terms, collapse = " + "))
+    )
+  } else if (ncol(surv_df) >= 3) {
+    fitting_df <- cbind(
+      design_df,
       time_start = surv_df[[1]],
       time_stop = surv_df[[2]],
       status = surv_df[[3]]
     )
-
     formula <- as.formula(
-      paste(
-        "Surv(time_start, time_stop, status) ~",
-        paste(available_vars, collapse = " + ")
+      paste0(
+        "survival::Surv(time_start, time_stop, status) ~ ",
+        paste(rhs_terms, collapse = " + ")
       )
     )
-
-    return(
-      tryCatch(
-        survival::coxph(formula, data = data),
-        error = function(e) NULL
-      )
-    )
+  } else {
+    return(NULL)
   }
 
-  NULL
+  tryCatch(
+    survival::coxph(formula, data = fitting_df),
+    error = function(e) NULL
+  )
 }
 
 #' lasso_cox モデルから係数を抽出
