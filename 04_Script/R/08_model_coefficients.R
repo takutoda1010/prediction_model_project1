@@ -75,6 +75,32 @@ empty_coef_tibble <- function() {
   }
 }
 
+quote_terms <- function(terms) {
+  if (length(terms) == 0) {
+    character()
+  } else {
+    paste0("`", gsub("`", "\\`", terms, fixed = TRUE), "`")
+  }
+}
+
+build_surv_object <- function(y) {
+  if (inherits(y, "Surv")) {
+    return(y)
+  }
+
+  y_df <- as.data.frame(y)
+
+  if (ncol(y_df) < 2) {
+    return(NULL)
+  }
+
+  if (ncol(y_df) == 2) {
+    return(survival::Surv(y_df[[1]], y_df[[2]]))
+  }
+
+  survival::Surv(y_df[[1]], y_df[[2]], y_df[[3]])
+}
+
 # ========================================================================
 # 1. ヘルパー関数: coxph
 # ========================================================================
@@ -239,7 +265,161 @@ extract_coefs_cv_glmnet <- function(model, model_name, lambda_value = NULL) {
     exp_conf_high = NA_real_,
     lambda = lambda_used
   ) %>%
-    filter(term != "(Intercept)")
+    filter(term != "(Intercept)") %>%
+    filter(!is.na(estimate) & !near(estimate, 0))
+}
+
+# ========================================================================
+# 3-b. ヘルパー関数: lasso_cox
+# ========================================================================
+
+fit_lasso_post_coxph <- function(model) {
+
+  selected_vars <- model$selected_vars %||% attr(model, "selected_vars")
+
+  if (is.null(selected_vars) || length(selected_vars) == 0) {
+    return(NULL)
+  }
+
+  if (is.null(model$X) || is.null(model$y)) {
+    return(NULL)
+  }
+
+  available_vars <- intersect(colnames(model$X), selected_vars)
+
+  if (length(available_vars) == 0) {
+    return(NULL)
+  }
+
+  design_matrix <- model$X[, available_vars, drop = FALSE]
+  surv_obj <- build_surv_object(model$y)
+
+  if (is.null(surv_obj)) {
+    return(NULL)
+  }
+
+  design_df <- as.data.frame(design_matrix)
+  rhs_terms <- quote_terms(colnames(design_df))
+
+  if (length(rhs_terms) == 0) {
+    return(NULL)
+  }
+
+  if (attr(surv_obj, "type") %in% c("right", "counting")) {
+    surv_df <- as.data.frame(surv_obj)
+  } else {
+    surv_df <- as.data.frame(model$y)
+  }
+
+  if (ncol(surv_df) == 2) {
+    fitting_df <- cbind(design_df, time = surv_df[[1]], status = surv_df[[2]])
+    formula <- as.formula(
+      paste0("survival::Surv(time, status) ~ ", paste(rhs_terms, collapse = " + "))
+    )
+  } else if (ncol(surv_df) >= 3) {
+    fitting_df <- cbind(
+      design_df,
+      time_start = surv_df[[1]],
+      time_stop = surv_df[[2]],
+      status = surv_df[[3]]
+    )
+    formula <- as.formula(
+      paste0(
+        "survival::Surv(time_start, time_stop, status) ~ ",
+        paste(rhs_terms, collapse = " + ")
+      )
+    )
+  } else {
+    return(NULL)
+  }
+
+  tryCatch(
+    survival::coxph(formula, data = fitting_df),
+    error = function(e) NULL
+  )
+}
+
+#' lasso_cox モデルから係数を抽出
+#' @param model lasso_cox オブジェクト
+#' @param model_name モデル名
+#' @return tibble
+extract_coefs_lasso_cox <- function(model, model_name) {
+
+  if (is.null(model)) {
+    return(empty_coef_tibble())
+  }
+
+  lambda_used <- model$lambda_min %||% model$lambda %||%
+    if (!is.null(model$cv_fit) && !is.null(model$cv_fit$lambda.min)) {
+      model$cv_fit$lambda.min
+    } else if (!is.null(model$glmnet_model) && !is.null(model$glmnet_model$lambda)) {
+      tail(model$glmnet_model$lambda, 1)
+    } else {
+      NA_real_
+    }
+
+  if (!is.null(model$fit) && inherits(model$fit, "coxph")) {
+    return(
+      extract_coefs_coxph(model$fit, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$model) && inherits(model$model, "coxph")) {
+    return(
+      extract_coefs_coxph(model$model, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  post_fit <- fit_lasso_post_coxph(model)
+
+  if (!is.null(post_fit)) {
+    return(
+      extract_coefs_coxph(post_fit, model_name) %>%
+        mutate(
+          model_type = "lasso_post_coxph",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$glmnet_model)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$glmnet_model,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  if (!is.null(model$cv_fit)) {
+    return(
+      extract_coefs_cv_glmnet(
+        model$cv_fit,
+        model_name,
+        lambda_value = lambda_used
+      ) %>%
+        mutate(
+          model_type = "lasso_glmnet",
+          lambda = as.numeric(lambda_used)
+        )
+    )
+  }
+
+  warning(sprintf("LASSO model '%s' does not contain recognizable coefficient data", model_name))
+  empty_coef_tibble()
 }
 
 # ========================================================================
