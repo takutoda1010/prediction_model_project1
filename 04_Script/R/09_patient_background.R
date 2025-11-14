@@ -337,7 +337,7 @@ table_formula <- reformulate(
 )
 
 tbl1 <- table1::table1(
-  formula = update(table_formula, ~ . | dataset),
+  update(table_formula, ~ . | dataset),
   data = combined_data,
   overall = "Overall",
   render.continuous = render_median_iqr,
