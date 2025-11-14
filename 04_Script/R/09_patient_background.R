@@ -215,7 +215,11 @@ render_n_percent <- function(x) {
 }
 
 normalize_names <- function(x) {
-  gsub("[^a-z]", "", tolower(x))
+  if (is.null(x)) {
+    return(character())
+  }
+  x <- ifelse(is.na(x), "", x)
+  gsub("[^a-z0-9]", "", tolower(x))
 }
 
 # ----------------------------------------------------------------------------
@@ -347,17 +351,52 @@ tbl1 <- table1::table1(
 
 tbl1_df <- as.data.frame(tbl1, row.names = FALSE, stringsAsFactors = FALSE)
 
-if (!all(c("label", "level") %in% names(tbl1_df))) {
-  stop("Unexpected structure from table1 output; expected 'label' and 'level' columns.")
+# Ensure column names are character and non-NULL for downstream matching
+if (is.null(names(tbl1_df))) {
+  names(tbl1_df) <- rep("", ncol(tbl1_df))
 }
 
 normalized_names <- normalize_names(names(tbl1_df))
-overall_col <- names(tbl1_df)[normalized_names == "overall"]
-train_col <- names(tbl1_df)[normalized_names %in% c("train", "training")]
-val_col <- names(tbl1_df)[normalized_names %in% c("validation", "val")]
-test_col <- names(tbl1_df)[normalized_names == "test"]
-pvalue_col <- names(tbl1_df)[normalized_names %in% c("pvalue", "pval")]
-missing_col <- names(tbl1_df)[normalized_names == "missing"]
+
+first_or_null <- function(x) {
+  if (length(x) > 0) x[[1]] else character(0)
+}
+
+label_candidates <- names(tbl1_df)[normalized_names %in% c("label", "variable", "rowname", "")]
+level_candidates <- names(tbl1_df)[normalized_names %in% c("level", "category", "group", "" )]
+
+label_col <- if (length(label_candidates) > 0) label_candidates[[1]] else names(tbl1_df)[1]
+level_col <- if (length(level_candidates) > 0) level_candidates[[1]] else NULL
+
+patient_background <- tbl1_df
+
+# Some table1 versions omit the level column; treat such cases gracefully
+if (!is.null(level_col) && !identical(level_col, label_col)) {
+  level_values <- patient_background[[level_col]]
+} else {
+  level_values <- rep("", nrow(patient_background))
+  level_col <- NULL
+}
+
+label_values <- patient_background[[label_col]]
+
+patient_background$Variable <- ifelse(
+  is.na(level_values) | level_values == "",
+  label_values,
+  paste0("  ", level_values)
+)
+
+drop_cols <- setdiff(c(label_col, level_col), "Variable")
+if (length(drop_cols) > 0) {
+  patient_background <- patient_background[, setdiff(names(patient_background), drop_cols), drop = FALSE]
+}
+
+overall_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) == "overall"])
+train_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) %in% c("train", "training")])
+val_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) %in% c("validation", "val")])
+test_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) == "test"])
+pvalue_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) %in% c("pvalue", "pval")])
+missing_col <- first_or_null(names(patient_background)[normalize_names(names(patient_background)) == "missing"])
 
 selected_cols <- c(
   "Variable",
@@ -368,13 +407,9 @@ selected_cols <- c(
   pvalue_col,
   missing_col
 )
-selected_cols <- selected_cols[selected_cols %in% c("Variable", names(tbl1_df))]
-selected_cols <- unique(selected_cols)
+selected_cols <- unique(selected_cols[selected_cols %in% names(patient_background)])
 
-patient_background <- tbl1_df |>
-  mutate(
-    Variable = ifelse(level == "", label, paste0("  ", level))
-  ) |>
+patient_background <- patient_background |>
   select(all_of(selected_cols))
 
 rename_if_present <- function(name, new_name) {
@@ -394,8 +429,10 @@ col_renames <- c(
   rename_if_present(missing_col, "Missing")
 )
 
-patient_background <- patient_background |>
-  rename(!!!col_renames)
+if (length(col_renames) > 0) {
+  patient_background <- patient_background |>
+    rename(!!!col_renames)
+}
 
 output_dir <- file.path(project_root, "03_Output", "tables")
 if (!dir.exists(output_dir)) {
