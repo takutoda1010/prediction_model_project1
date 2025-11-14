@@ -203,10 +203,15 @@ render_median_iqr <- function(x) {
 render_n_percent <- function(x) {
   s <- table1::stats.default(x)
   if (is.null(dim(s)) || nrow(s) == 0) {
-    return(c("" = ""))
+    return(c(" " = ""))
   }
   lines <- sprintf("%s (%.1f%%)", format(s[, "freq"], trim = TRUE), s[, "percent"])
-  c("" = "", lines)
+  if (is.null(rownames(s))) {
+    names(lines) <- as.character(seq_along(lines))
+  } else {
+    names(lines) <- rownames(s)
+  }
+  c(" " = "", lines)
 }
 
 normalize_names <- function(x) {
